@@ -29,7 +29,7 @@ var vmServiceLineURL = regexp.MustCompile(`http://127\.0\.0\.1:(\d+)/([A-Za-z0-9
 
 // tryDumpFlutterSource returns the Flutter render tree for the foreground app,
 // or ok=false to signal the caller should use the accessibility dump.
-func (s *SimulatorDevice) tryDumpFlutterSource() ([]types.ScreenElement, bool) {
+func (s *SimulatorDevice) tryDumpFlutterSource(source TreeSource) ([]types.ScreenElement, bool) {
 	foreground, err := s.GetForegroundApp()
 	if err != nil {
 		return nil, false
@@ -44,12 +44,12 @@ func (s *SimulatorDevice) tryDumpFlutterSource() ([]types.ScreenElement, bool) {
 		return nil, false
 	}
 	start := time.Now()
-	elements, err := dumpFlutterSourceFromURI(uri, 1.0)
+	elements, err := dumpFlutterSourceFromURI(uri, 1.0, source)
 	if err != nil {
-		utils.Verbose("flutter: render-tree dump failed, falling back: %v", err)
+		utils.Verbose("flutter: %s dump failed, falling back: %v", source.describe(), err)
 		return nil, false
 	}
-	utils.Verbose("flutter: render-tree dump produced %d elements in %s", len(elements), time.Since(start))
+	utils.Verbose("flutter: %s dump produced %d elements in %s", source.describe(), len(elements), time.Since(start))
 	return elements, true
 }
 
@@ -117,7 +117,7 @@ func (s *SimulatorDevice) authCodeFromLogForPort(port string) string {
 // uri's host:port (the iOS-simulator case — the app runs on the Mac) and walks
 // the render tree. dpr is 1.0 for iOS (points) and the device pixel ratio for
 // Android (physical pixels).
-func dumpFlutterSourceFromURI(uri string, dpr float64) ([]types.ScreenElement, error) {
+func dumpFlutterSourceFromURI(uri string, dpr float64, source TreeSource) ([]types.ScreenElement, error) {
 	m := vmServiceURIPattern.FindStringSubmatch(strings.TrimSpace(uri))
 	if m == nil {
 		return nil, fmt.Errorf("unexpected Dart VM service URI: %q", uri)
@@ -128,13 +128,13 @@ func dumpFlutterSourceFromURI(uri string, dpr float64) ([]types.ScreenElement, e
 	if m[2] != "" {
 		wsURL = fmt.Sprintf("ws://127.0.0.1:%s/%s/ws", m[1], m[2])
 	}
-	return dumpFlutterTreeOverWS(wsURL, dpr)
+	return dumpFlutterTreeOverWS(wsURL, dpr, source)
 }
 
 // dumpFlutterTreeOverWS is the platform-neutral core: dial the Dart VM service
 // WebSocket, bind the isolate, and walk the render tree. Android reaches it
 // through an adb-forwarded local port; iOS connects to the Mac directly.
-func dumpFlutterTreeOverWS(wsURL string, dpr float64) ([]types.ScreenElement, error) {
+func dumpFlutterTreeOverWS(wsURL string, dpr float64, source TreeSource) ([]types.ScreenElement, error) {
 	vm, err := dialFlutterVM(wsURL)
 	if err != nil {
 		return nil, err
@@ -142,6 +142,9 @@ func dumpFlutterTreeOverWS(wsURL string, dpr float64) ([]types.ScreenElement, er
 	defer vm.close()
 	if err := vm.resolveIsolate(); err != nil {
 		return nil, err
+	}
+	if source == TreeSourceSemantics {
+		return vm.dumpSemanticsTree(dpr)
 	}
 	return vm.dumpRenderTree(dpr)
 }

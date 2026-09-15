@@ -754,6 +754,7 @@ type DumpUIParams struct {
 	DeviceID string `json:"deviceId"`
 	Format   string `json:"format,omitempty"` // "json" or "raw"
 	Full     bool   `json:"full,omitempty"`   // include the on-screen keyboard and other normally hidden windows
+	Source   string `json:"source,omitempty"` // "render", "semantics" or "ax"; empty picks the render tree with an accessibility fallback
 }
 
 type AppsLaunchParams struct {
@@ -1073,6 +1074,7 @@ func handleDumpUI(params json.RawMessage) (any, error) {
 		DeviceID: dumpUIParams.DeviceID,
 		Format:   dumpUIParams.Format,
 		Full:     dumpUIParams.Full,
+		Source:   dumpUIParams.Source,
 	}
 
 	response := commands.DumpUICommand(req)

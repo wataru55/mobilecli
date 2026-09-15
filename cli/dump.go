@@ -17,6 +17,7 @@ var dumpCmd = &cobra.Command{
 var (
 	dumpUIFormat string
 	dumpUIFull   bool
+	dumpUISource string
 )
 
 var dumpUICmd = &cobra.Command{
@@ -28,6 +29,7 @@ var dumpUICmd = &cobra.Command{
 			DeviceID: deviceId,
 			Format:   dumpUIFormat,
 			Full:     dumpUIFull,
+			Source:   dumpUISource,
 		}
 
 		raw, err := callDaemon("cli.dump.ui", req, daemon.NoTimeout)
@@ -63,4 +65,5 @@ func init() {
 	dumpUICmd.Flags().StringVar(&deviceId, "device", "", "ID of the device to dump UI tree from")
 	dumpUICmd.Flags().StringVar(&dumpUIFormat, "format", "", "Output format: 'text' for indented element lines, 'raw' for unprocessed tree from agent (Default: json)")
 	dumpUICmd.Flags().BoolVar(&dumpUIFull, "full", false, "Include additional elements normally left out, such as the on-screen keyboard")
+	dumpUICmd.Flags().StringVar(&dumpUISource, "source", "", "Which tree to read: 'render' (Flutter render objects; types and unlabeled nodes, thousands of RPCs), 'semantics' (Flutter accessibility tree; one RPC, labels and identifiers only), 'ax' (platform accessibility dump). Default: render with an ax fallback")
 }

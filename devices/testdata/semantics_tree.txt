@@ -1,0 +1,70 @@
+SemanticsNode#0
+ │ Rect.fromLTRB(0.0, 0.0, 1206.0, 2622.0)
+ │
+ └─SemanticsNode#1
+   │ Rect.fromLTRB(0.0, 0.0, 402.0, 874.0) scaled by 3.0x
+   │ textDirection: ltr
+   │ sortKey: OrdinalSortKey#12345(order: 0.0)
+   │
+   └─SemanticsNode#2
+     │ Rect.fromLTRB(0.0, 0.0, 402.0, 874.0)
+     │ flags: scopesRoute
+     │ identifier: "MainScreen"
+     │
+     ├─SemanticsNode#3
+     │   Rect.fromLTRB(100.0, 740.0, 300.0, 756.0)
+     │   tags: RenderViewport.twoPane
+     │   label: "Section heading"
+     │   textDirection: ltr
+     │
+     ├─SemanticsNode#4
+     │   Rect.fromLTRB(0.0, 0.0, 180.0, 250.0)
+     │   flags: isHidden, isImage
+     │   HIDDEN
+     │   label:
+     │     "Offscreen card
+     │     4"
+     │   textDirection: ltr
+     │
+     ├─SemanticsNode#5
+     │ │ Rect.fromLTRB(60.0, 785.0, 340.0, 829.0)
+     │ │ role: tabBar
+     │ │
+     │ ├─SemanticsNode#6
+     │ │   merge boundary ⛔️
+     │ │   Rect.fromLTRB(0.0, 1.0, 40.0, 43.0)
+     │ │   actions: tap
+     │ │   flags: isSelected, isFocusable, hasSelectedState
+     │ │   label:
+     │ │     "Mon
+     │ │     tab: 1/2"
+     │ │   textDirection: ltr
+     │ │   role: tab
+     │ │
+     │ └─SemanticsNode#7
+     │     Rect.fromLTRB(40.0, 1.0, 80.0, 43.0)
+     │     actions: tap
+     │     flags: isFocusable, hasSelectedState
+     │     label:
+     │       "Tue
+     │       tab: 2/2"
+     │     textDirection: ltr
+     │     role: tab
+     │
+     └─SemanticsNode#8
+       │ Rect.fromLTRB(0.0, 788.0, 402.0, 840.0)
+       │
+       ├─SemanticsNode#9
+       │   Rect.fromLTRB(44.0, 0.0, 123.0, 52.0)
+       │   actions: tap
+       │   flags: isImage
+       │   label: "Home"
+       │   identifier: "NavHome"
+       │   textDirection: ltr
+       │
+       └─SemanticsNode#10
+           Rect.fromLTRB(123.5, 0.0, 203.0, 52.0)
+           actions: tap
+           label: "Library"
+           identifier: "NavLibrary"
+           textDirection: ltr

@@ -14,6 +14,7 @@ type DumpUIRequest struct {
 	DeviceID string `json:"deviceId"`
 	Format   string `json:"format"`
 	Full     bool   `json:"full"`
+	Source   string `json:"source"`
 }
 
 // DumpUIResponse represents the response for a dump UI command
@@ -32,7 +33,11 @@ func DumpUICommand(req DumpUIRequest) *CommandResponse {
 	}
 
 	var response DumpUIResponse
-	opts := devices.DumpOptions{Full: req.Full}
+	source := devices.TreeSource(req.Source)
+	if !source.Valid() {
+		return NewErrorResponse(fmt.Errorf("unknown source %q; want one of: render, semantics, ax", req.Source))
+	}
+	opts := devices.DumpOptions{Full: req.Full, Source: source}
 
 	// Check if raw format is requested
 	if req.Format == "raw" {

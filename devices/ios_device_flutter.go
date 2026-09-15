@@ -27,7 +27,7 @@ import (
 
 // tryDumpFlutterSource returns the Flutter render tree for the foreground app,
 // or ok=false to signal the caller should use the accessibility dump.
-func (d *IOSDevice) tryDumpFlutterSource() ([]types.ScreenElement, bool) {
+func (d *IOSDevice) tryDumpFlutterSource(source TreeSource) ([]types.ScreenElement, bool) {
 	raw, err := d.agentCall("device.flutter.vmServiceUri", nil)
 	if err != nil {
 		// Expected for non-Flutter apps ("not a flutter app") and when the
@@ -42,9 +42,9 @@ func (d *IOSDevice) tryDumpFlutterSource() ([]types.ScreenElement, bool) {
 		return nil, false
 	}
 
-	elements, err := d.dumpFlutterSourceDevice(r.URI)
+	elements, err := d.dumpFlutterSourceDevice(r.URI, source)
 	if err != nil {
-		utils.Verbose("flutter: render-tree dump failed, falling back: %v", err)
+		utils.Verbose("flutter: %s dump failed, falling back: %v", source.describe(), err)
 		return nil, false
 	}
 	return elements, true
@@ -52,7 +52,7 @@ func (d *IOSDevice) tryDumpFlutterSource() ([]types.ScreenElement, bool) {
 
 // dumpFlutterSourceDevice forwards a local port to the device's VM service port
 // and walks the render tree over it.
-func (d *IOSDevice) dumpFlutterSourceDevice(uri string) ([]types.ScreenElement, error) {
+func (d *IOSDevice) dumpFlutterSourceDevice(uri string, source TreeSource) ([]types.ScreenElement, error) {
 	m := vmServiceURIPattern.FindStringSubmatch(strings.TrimSpace(uri))
 	if m == nil {
 		return nil, fmt.Errorf("unexpected Dart VM service URI: %q", uri)
@@ -80,10 +80,10 @@ func (d *IOSDevice) dumpFlutterSourceDevice(uri string) ([]types.ScreenElement, 
 	}
 
 	start := time.Now()
-	elements, err := dumpFlutterTreeOverWS(wsURL, 1.0)
+	elements, err := dumpFlutterTreeOverWS(wsURL, 1.0, source)
 	if err != nil {
 		return nil, err
 	}
-	utils.Verbose("flutter: render-tree dump produced %d elements in %s", len(elements), time.Since(start))
+	utils.Verbose("flutter: %s dump produced %d elements in %s", source.describe(), len(elements), time.Since(start))
 	return elements, nil
 }

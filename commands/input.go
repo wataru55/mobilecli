@@ -16,6 +16,9 @@ type TapRequest struct {
 	X        int    `json:"x"`
 	Y        int    `json:"y"`
 	Ref      string `json:"ref,omitempty"`
+	// Source must match the dump the ref came from: refs are positional, so
+	// resolving them against a different tree taps a different element.
+	Source string `json:"source,omitempty"`
 }
 
 // LongPressRequest represents the parameters for a long press command. Either
@@ -26,6 +29,8 @@ type LongPressRequest struct {
 	Y        int    `json:"y"`
 	Duration int    `json:"duration"`
 	Ref      string `json:"ref,omitempty"`
+	// Source must match the dump the ref came from; see TapRequest.
+	Source string `json:"source,omitempty"`
 }
 
 // TextRequest represents the parameters for a text input command
@@ -146,7 +151,7 @@ func TapCommand(req TapRequest) *CommandResponse {
 
 	x, y := req.X, req.Y
 	if req.Ref != "" {
-		x, y, err = resolveRefTapPoint(targetDevice, req.Ref)
+		x, y, err = resolveRefTapPoint(targetDevice, req.Ref, req.Source)
 		if err != nil {
 			return NewErrorResponse(err)
 		}
@@ -165,8 +170,14 @@ func TapCommand(req TapRequest) *CommandResponse {
 // resolveRefTapPoint re-dumps the UI tree, numbers it exactly like "dump ui"
 // does, and returns the center of the element matching ref ("@e5").
 // Refs are positional against a fresh dump; there is no staleness tracking.
-func resolveRefTapPoint(device devices.ControllableDevice, ref string) (int, int, error) {
-	elements, err := device.DumpSource(devices.DumpOptions{})
+// source must match the dump that produced the ref, or the numbering refers to
+// a different tree.
+func resolveRefTapPoint(device devices.ControllableDevice, ref string, source string) (int, int, error) {
+	treeSource := devices.TreeSource(source)
+	if !treeSource.Valid() {
+		return 0, 0, fmt.Errorf("unknown source %q; want one of: render, semantics, ax", source)
+	}
+	elements, err := device.DumpSource(devices.DumpOptions{Source: treeSource})
 	if err != nil {
 		return 0, 0, fmt.Errorf("failed to dump UI to resolve ref %s: %w", ref, err)
 	}
@@ -205,7 +216,7 @@ func LongPressCommand(req LongPressRequest) *CommandResponse {
 
 	x, y := req.X, req.Y
 	if req.Ref != "" {
-		x, y, err = resolveRefTapPoint(targetDevice, req.Ref)
+		x, y, err = resolveRefTapPoint(targetDevice, req.Ref, req.Source)
 		if err != nil {
 			return NewErrorResponse(err)
 		}

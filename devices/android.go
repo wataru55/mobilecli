@@ -1658,8 +1658,13 @@ func (d *AndroidDevice) DumpSource(opts DumpOptions) ([]ScreenElement, error) {
 	// dumps below miss typed/unlabeled/non-semantic widgets. When the foreground
 	// app is a debuggable Flutter app, read its live render tree from the Dart VM
 	// service instead. Any failure falls through to the accessibility dump.
-	if elements, ok := d.tryDumpFlutterSource(); ok {
-		return elements, nil
+	if opts.Source != TreeSourceAccessibility {
+		if elements, ok := d.tryDumpFlutterSource(opts.Source); ok {
+			return elements, nil
+		}
+		if opts.Source != TreeSourceAuto {
+			return nil, fmt.Errorf("the Flutter %s is unavailable for the foreground app", opts.Source.describe())
+		}
 	}
 
 	if nodes, err := d.dumpUiNodes(opts); err == nil {

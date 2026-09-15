@@ -150,9 +150,54 @@ type LaunchOptions struct {
 }
 
 // DumpOptions controls what a UI dump includes.
+// TreeSource selects which tree a dump reads. They differ by cost and by what
+// they can see, and the difference is large enough that callers should choose:
+// the render-tree walk issues a few RPCs per render object (thousands of calls,
+// seconds), while the semantics tree is a single call (milliseconds) that only
+// covers what the app exposes to accessibility.
+type TreeSource string
+
+const (
+	// TreeSourceAuto keeps the historical behaviour: the Flutter render tree
+	// when it is reachable, otherwise the platform accessibility dump.
+	TreeSourceAuto TreeSource = ""
+	// TreeSourceRender requires the Flutter render tree. It is the only source
+	// that reports render-object types and unlabeled nodes.
+	TreeSourceRender TreeSource = "render"
+	// TreeSourceSemantics requires the Flutter semantics tree: one RPC, and the
+	// labels, values, identifiers, roles and rects that go with them.
+	TreeSourceSemantics TreeSource = "semantics"
+	// TreeSourceAccessibility requires the platform accessibility dump
+	// (XCUITest or UIAutomator), skipping Flutter entirely.
+	TreeSourceAccessibility TreeSource = "ax"
+)
+
+// describe names the source for log lines.
+func (s TreeSource) describe() string {
+	switch s {
+	case TreeSourceSemantics:
+		return "semantics-tree"
+	case TreeSourceAccessibility:
+		return "accessibility"
+	}
+	// Auto reads the render tree whenever it can, so it logs as one.
+	return "render-tree"
+}
+
+// Valid reports whether s is a known source.
+func (s TreeSource) Valid() bool {
+	switch s {
+	case TreeSourceAuto, TreeSourceRender, TreeSourceSemantics, TreeSourceAccessibility:
+		return true
+	}
+	return false
+}
+
 type DumpOptions struct {
 	// Full includes windows normally left out, such as the on-screen keyboard.
 	Full bool
+	// Source selects which tree to read; see TreeSource.
+	Source TreeSource
 }
 
 type ControllableDevice interface {

@@ -62,11 +62,16 @@ var ioTapCmd = &cobra.Command{
 			X:        target.X,
 			Y:        target.Y,
 			Ref:      target.Ref,
+			Source:   ioSource,
 		}
 
 		return runViaDaemon("cli.io.tap", req)
 	},
 }
+
+// ioSource must match the "dump ui" that produced a ref, since refs are
+// positional against whichever tree that dump walked.
+var ioSource string
 
 var longPressDuration int
 var swipeDuration int
@@ -93,6 +98,7 @@ var ioLongPressCmd = &cobra.Command{
 			Y:        target.Y,
 			Duration: longPressDuration,
 			Ref:      target.Ref,
+			Source:   ioSource,
 		}
 
 		return runViaDaemon("cli.io.longpress", req)
@@ -237,7 +243,9 @@ func init() {
 
 	// io command flags
 	ioTapCmd.Flags().StringVar(&deviceId, "device", "", "ID of the device to tap on")
+	ioTapCmd.Flags().StringVar(&ioSource, "source", "", "Tree to resolve an element ref against; must match the 'dump ui --source' the ref came from")
 	ioLongPressCmd.Flags().StringVar(&deviceId, "device", "", "ID of the device to long press on")
+	ioLongPressCmd.Flags().StringVar(&ioSource, "source", "", "Tree to resolve an element ref against; must match the 'dump ui --source' the ref came from")
 	ioLongPressCmd.Flags().IntVar(&longPressDuration, "duration", 500, "duration of the long press in milliseconds")
 	ioSwipeCmd.Flags().IntVar(&swipeDuration, "duration", 0, "duration of the swipe in milliseconds (0 uses the platform default)")
 	ioButtonCmd.Flags().StringVar(&deviceId, "device", "", "ID of the device to press button on")

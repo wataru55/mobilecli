@@ -59,12 +59,14 @@ func (d *AndroidDevice) flutterVMServiceURI(pkg string) string {
 // or ok=false to signal the caller should use the accessibility dump. Detection
 // requires a debuggable app (the JVMTI agent only attaches to those), which is
 // also the only case where a Dart VM service exists.
-func (d *AndroidDevice) tryDumpFlutterSource() ([]types.ScreenElement, bool) {
-	foreground, err := d.GetForegroundApp()
+func (d *AndroidDevice) tryDumpFlutterSource(source TreeSource) ([]types.ScreenElement, bool) {
+	// Only the package name matters here. GetForegroundApp would also resolve
+	// the app's display name, which lists every installed package — ~400ms on
+	// an emulator, for a field this path discards.
+	pkg, _, err := d.getForegroundComponent()
 	if err != nil {
 		return nil, false
 	}
-	pkg := foreground.PackageName
 	if !d.isAppDebuggable(pkg) {
 		return nil, false
 	}
@@ -73,19 +75,19 @@ func (d *AndroidDevice) tryDumpFlutterSource() ([]types.ScreenElement, bool) {
 		return nil, false
 	}
 	start := time.Now()
-	elements, err := d.dumpFlutterSource(uri)
+	elements, err := d.dumpFlutterSource(uri, source)
 	if err != nil {
-		utils.Verbose("flutter: render-tree dump failed, falling back: %v", err)
+		utils.Verbose("flutter: %s dump failed, falling back: %v", source.describe(), err)
 		return nil, false
 	}
-	utils.Verbose("flutter: render-tree dump produced %d elements in %s", len(elements), time.Since(start))
+	utils.Verbose("flutter: %s dump produced %d elements in %s", source.describe(), len(elements), time.Since(start))
 	return elements, true
 }
 
 // dumpFlutterSource reads the Flutter render tree over the VM service and
 // converts it to ScreenElements. uri is the on-device service URI; we forward a
 // host port to its device port and speak the VM-service protocol over WebSocket.
-func (d *AndroidDevice) dumpFlutterSource(uri string) ([]types.ScreenElement, error) {
+func (d *AndroidDevice) dumpFlutterSource(uri string, source TreeSource) ([]types.ScreenElement, error) {
 	m := vmServiceURIPattern.FindStringSubmatch(strings.TrimSpace(uri))
 	if m == nil {
 		return nil, fmt.Errorf("unexpected Dart VM service URI: %q", uri)
@@ -104,7 +106,7 @@ func (d *AndroidDevice) dumpFlutterSource(uri string) ([]types.ScreenElement, er
 
 	// The device port is now reachable at the forwarded local port.
 	wsURL := fmt.Sprintf("ws://127.0.0.1:%d/%s/ws", localPort, token)
-	return dumpFlutterTreeOverWS(wsURL, d.devicePixelRatio())
+	return dumpFlutterTreeOverWS(wsURL, d.devicePixelRatio(), source)
 }
 
 // devicePixelRatio maps Flutter's logical pixels to the physical pixels that

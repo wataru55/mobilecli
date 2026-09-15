@@ -879,13 +879,21 @@ func (s *SimulatorDevice) getDeviceKitEnvPort(envVar string) (int, error) {
 	return port, nil
 }
 
-func (s SimulatorDevice) DumpSource(_ DumpOptions) ([]ScreenElement, error) {
+func (s SimulatorDevice) DumpSource(opts DumpOptions) ([]ScreenElement, error) {
 	// Flutter apps render into an opaque native view, so the accessibility dump
 	// misses typed/unlabeled/non-semantic widgets. When the foreground app is a
 	// Flutter app with a live Dart VM service, read its render tree instead. Any
 	// failure falls through to the accessibility dump.
-	if elements, ok := s.tryDumpFlutterSource(); ok {
+	if opts.Source == TreeSourceAccessibility {
+		return s.deviceKitClient.GetSourceElements()
+	}
+	if elements, ok := s.tryDumpFlutterSource(opts.Source); ok {
 		return elements, nil
+	}
+	if opts.Source != TreeSourceAuto {
+		// An explicit request should say it could not be honoured rather than
+		// quietly hand back a different tree.
+		return nil, fmt.Errorf("the Flutter %s is unavailable for the foreground app", opts.Source.describe())
 	}
 	return s.deviceKitClient.GetSourceElements()
 }

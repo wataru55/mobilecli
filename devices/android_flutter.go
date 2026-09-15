@@ -60,11 +60,13 @@ func (d *AndroidDevice) flutterVMServiceURI(pkg string) string {
 // requires a debuggable app (the JVMTI agent only attaches to those), which is
 // also the only case where a Dart VM service exists.
 func (d *AndroidDevice) tryDumpFlutterSource(source TreeSource) ([]types.ScreenElement, bool) {
-	foreground, err := d.GetForegroundApp()
+	// Only the package name matters here. GetForegroundApp would also resolve
+	// the app's display name, which lists every installed package — ~400ms on
+	// an emulator, for a field this path discards.
+	pkg, _, err := d.getForegroundComponent()
 	if err != nil {
 		return nil, false
 	}
-	pkg := foreground.PackageName
 	if !d.isAppDebuggable(pkg) {
 		return nil, false
 	}

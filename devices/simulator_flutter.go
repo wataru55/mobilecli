@@ -1,11 +1,8 @@
 package devices
 
 import (
-	"bufio"
-	"context"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -26,9 +23,9 @@ import (
 // iOS reports layout in logical points (matching the existing DeviceKit dump),
 // so unlike Android we do not scale by the device pixel ratio (dpr = 1.0).
 
-// vmServiceLineURL pulls the service URL out of the engine's log line
+// vmServiceLineURL pulls the port and auth token out of the engine's log line
 // "The Dart VM service is listening on http://127.0.0.1:PORT/TOKEN/".
-var vmServiceLineURL = regexp.MustCompile(`http://127\.0\.0\.1:\d+/[A-Za-z0-9_=-]*/`)
+var vmServiceLineURL = regexp.MustCompile(`http://127\.0\.0\.1:(\d+)/([A-Za-z0-9_=-]*)/`)
 
 // tryDumpFlutterSource returns the Flutter render tree for the foreground app,
 // or ok=false to signal the caller should use the accessibility dump.
@@ -71,17 +68,20 @@ func (s *SimulatorDevice) isFlutterAppBundle(bundleID string) bool {
 }
 
 // flutterVMServiceURI recovers the running app's Dart VM service URI (with its
-// auth token). Primary source is mDNS: the Flutter engine advertises
-// `_dartVmService._tcp` (instance name = bundle id) with the port and auth code
-// in its TXT record, for as long as the app runs — this is what `flutter attach`
-// uses, ~5ms, and survives log rotation. The simulator log is a fallback for the
-// rare case where VM-service publication is disabled.
+// auth token). Everything here hangs off the target app's own process (see
+// simulator_flutter_process.go), whose executable path carries the UDID and
+// whose listening port identifies the VM service.
+//
+// Neither of the looser sources can stand on its own. A host-wide mDNS lookup
+// keys only on the bundle id, and a simulator app runs natively on the Mac, so
+// it cannot tell two simulators running the same app apart. The simulator log
+// is device-scoped but holds a line for every Flutter app launched there, so
+// its newest entry may belong to a different app or to a dead earlier run.
+// Both are therefore used only to supply the auth code for the port we already
+// resolved, never to choose the port. Answering for the wrong app or device is
+// worse than not answering at all.
 func (s *SimulatorDevice) flutterVMServiceURI(bundleID string) string {
-	if uri := resolveDartVMServiceMDNS(bundleID, 3*time.Second); uri != "" {
-		return uri
-	}
-	utils.Verbose("flutter: mDNS lookup failed for %s, trying simulator log", bundleID)
-	return s.flutterVMServiceURIFromLog()
+	return s.simulatorVMServiceURI(bundleID)
 }
 
 var (
@@ -89,60 +89,28 @@ var (
 	mdnsAuthCode = regexp.MustCompile(`authCode=([A-Za-z0-9_=+/\-]+)`)
 )
 
-// resolveDartVMServiceMDNS resolves the app's Dart VM service via Bonjour and
-// returns http://127.0.0.1:<port>/<authCode>/, or "" if not found in time.
-func resolveDartVMServiceMDNS(bundleID string, timeout time.Duration) string {
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
-	defer cancel()
-
-	// -L resolves a specific instance (the bundle id) to host:port + TXT record.
-	// dns-sd streams until killed, so we read until we have both fields. Use the
-	// absolute system path rather than relying on PATH.
-	cmd := exec.CommandContext(ctx, "/usr/bin/dns-sd", "-L", bundleID, "_dartVmService._tcp", "local.")
-	stdout, err := cmd.StdoutPipe()
-	if err != nil {
-		return ""
-	}
-	if err := cmd.Start(); err != nil {
-		return ""
-	}
-	defer func() {
-		_ = cmd.Process.Kill()
-		_ = cmd.Wait()
-	}()
-
-	var port, auth string
-	scanner := bufio.NewScanner(stdout)
-	for scanner.Scan() {
-		line := scanner.Text()
-		if m := mdnsPortLine.FindStringSubmatch(line); m != nil {
-			port = m[1]
-		}
-		if m := mdnsAuthCode.FindStringSubmatch(line); m != nil {
-			auth = m[1]
-		}
-		if port != "" && auth != "" {
-			return fmt.Sprintf("http://127.0.0.1:%s/%s/", port, auth)
-		}
-	}
-	return ""
-}
-
-// flutterVMServiceURIFromLog scrapes the URI (with token) from the simulator log,
-// where the engine prints it once at launch. Fragile — the line rotates out of
-// the log buffer over time — so it is only a fallback for mDNS.
-func (s *SimulatorDevice) flutterVMServiceURIFromLog() string {
+// authCodeFromLogForPort returns the auth code the engine printed at launch for
+// the VM service listening on port, or "" when the log no longer carries it.
+//
+// The log is device-scoped but not app-scoped, so the port is what ties a line
+// to the right app: it comes from the target app's own process, and lines for
+// other apps or for dead earlier runs carry different ports. Matching on it is
+// what makes this safe to use. Fragile in the other direction too — the line
+// rotates out of the buffer over time — so an empty result is normal.
+func (s *SimulatorDevice) authCodeFromLogForPort(port string) string {
 	out, err := runSimctl("spawn", s.UDID, "log", "show", "--last", "30m",
 		"--style", "compact", "--predicate", `eventMessage CONTAINS "Dart VM service is listening"`)
 	if err != nil {
 		utils.Verbose("flutter: reading simulator log failed: %v", err)
 		return ""
 	}
-	matches := vmServiceLineURL.FindAllString(string(out), -1)
-	if len(matches) == 0 {
-		return ""
+	token := ""
+	for _, m := range vmServiceLineURL.FindAllStringSubmatch(string(out), -1) {
+		if m[1] == port {
+			token = m[2] // newest line for this port wins
+		}
 	}
-	return matches[len(matches)-1] // newest listener wins
+	return token
 }
 
 // dumpFlutterSourceFromURI connects to a Dart VM service already reachable at

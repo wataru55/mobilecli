@@ -36,6 +36,9 @@ extern void *memset(void *, int, unsigned long);
 extern char *strdup(const char *);
 extern void free(void *);
 extern unsigned long strlen(const char *);
+// NSNotFound is a `static const` in recent SDKs; a block referencing it is
+// rejected by LLDB ("Capturing non-local variables"), so use a macro instead.
+#define __mcNotFound ((NSUInteger)0x7fffffffffffffffL) // NSIntegerMax
 #define __AF_INET    2
 #define __SOCK_STREAM 1
 #define __SOL_SOCKET  0xffff
@@ -89,7 +92,7 @@ if (__port > 0) {
                 while ((n = recv(cfd, tmp, sizeof(tmp), 0)) > 0) {
                     [buf appendBytes:tmp length:(NSUInteger)n];
                     NSRange sep = [buf rangeOfData:crlf options:0 range:NSMakeRange(0, buf.length)];
-                    if (sep.location != NSNotFound) {
+                    if (sep.location != __mcNotFound) {
                         NSString *hdr = [[NSString alloc] initWithData:[buf subdataWithRange:NSMakeRange(0, sep.location)] encoding:NSASCIIStringEncoding];
                         NSInteger cl = 0;
                         for (NSString *__hdrLine in [hdr componentsSeparatedByString:@"\r\n"])
@@ -102,7 +105,7 @@ if (__port > 0) {
                     }
                 }
                 NSRange hr = [buf rangeOfData:crlf options:0 range:NSMakeRange(0, buf.length)];
-                NSData *body = (hr.location == NSNotFound) ? [NSData data] :
+                NSData *body = (hr.location == __mcNotFound) ? [NSData data] :
                     [buf subdataWithRange:NSMakeRange(hr.location + 4, buf.length - hr.location - 4)];
                 NSDictionary *req = [NSJSONSerialization JSONObjectWithData:body options:0 error:nil];
                 id rqId = req[@"id"] ?: [NSNull null];
@@ -248,7 +251,7 @@ if (__port > 0) {
                     __block NSString *uri = nil;
                     id sem = dispatch_semaphore_create(0);
                     [[NSOperationQueue mainQueue] addOperationWithBlock:^{
-                        @try {
+                        {
                             Class fvcCls = NSClassFromString(@"FlutterViewController");
                             Class wsCls = (Class)objc_getClass("UIWindowScene");
                             id app = (id)[(Class)objc_getClass("UIApplication") sharedApplication];
@@ -257,14 +260,14 @@ if (__port > 0) {
                                 if (![(NSObject *)sc isKindOfClass:wsCls]) continue;
                                 for (id win in (NSArray *)[sc windows]) {
                                     NSMutableArray *stk = [NSMutableArray array];
-                                    id root = [win rootViewController];
+                                    id root = (id)[win rootViewController];
                                     if (root) [stk addObject:root];
                                     while ([stk count]) {
                                         id vc = stk[0]; [stk removeObjectAtIndex:0];
                                         if (fvcCls && [(NSObject *)vc isKindOfClass:fvcCls]) { fvc = vc; break; }
                                         NSArray *kids = (NSArray *)[vc childViewControllers];
                                         if (kids) [stk addObjectsFromArray:kids];
-                                        id presented = [vc presentedViewController];
+                                        id presented = (id)[vc presentedViewController];
                                         if (presented) [stk addObject:presented];
                                     }
                                     if (fvc) break;
@@ -272,12 +275,12 @@ if (__port > 0) {
                                 if (fvc) break;
                             }
                             if (fvc) {
-                                id engine = [fvc engine];
-                                id pub = engine ? [engine valueForKey:@"publisher"] : nil;
-                                id url = pub ? [pub url] : nil;
+                                id engine = [(NSObject *)fvc respondsToSelector:NSSelectorFromString(@"engine")] ? (id)[fvc engine] : nil;
+                                id pub = (engine && [(NSObject *)engine respondsToSelector:NSSelectorFromString(@"publisher")]) ? (id)[engine valueForKey:@"publisher"] : nil;
+                                id url = (pub && [(NSObject *)pub respondsToSelector:NSSelectorFromString(@"url")]) ? (id)[pub url] : nil;
                                 if (url) uri = [(NSURL *)url absoluteString];
                             }
-                        } @catch (id __e) { uri = nil; }
+                        }
                         dispatch_semaphore_signal(sem);
                     }];
                     dispatch_semaphore_wait(sem, dispatch_time(0, 5000000000LL));

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"os"
 
 	"github.com/mobile-next/mobilecli/commands"
 	"github.com/mobile-next/mobilecli/utils"
@@ -200,6 +201,9 @@ UTILITIES:
   # Dump UI tree
   mobilecli dump ui --device <device-id>
 
+  # Dump UI tree as text (alias of 'dump ui --format text')
+  mobilecli snapshot --device <device-id>
+
   # Start HTTP server
   mobilecli server start --listen localhost:12000 --cors
 
@@ -207,19 +211,29 @@ COMMON FLAGS:
   --device <id>        Device ID (from 'mobilecli devices' command)
   -v, --verbose        Enable verbose output
   --help               Show help for any command`,
-	CompletionOptions: cobra.CompletionOptions{
-		HiddenDefaultCmd: true,
-	},
 	Version:       utils.Version,
 	SilenceUsage:  true,
 	SilenceErrors: true,
 	PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
-		token, _ := getRemoteToken()
+		deviceId = resolveDeviceID(deviceId, os.Getenv)
+
+		token, err := getRemoteToken()
+		if err != nil {
+			utils.Verbose("no remote token: %v", err)
+		}
 		if token != "" {
 			commands.SetFleetConfig(token)
 		}
 		return nil
 	},
+}
+
+// resolveDeviceID falls back to MOBILECLI_DEVICE when --device isn't given
+func resolveDeviceID(flagValue string, getenv func(string) string) string {
+	if flagValue != "" {
+		return flagValue
+	}
+	return getenv("MOBILECLI_DEVICE")
 }
 
 func initConfig() {
@@ -229,7 +243,7 @@ func initConfig() {
 func init() {
 	cobra.OnInitialize(initConfig)
 	rootCmd.PersistentFlags().BoolVarP(&verbose, "verbose", "v", false, "enable verbose output")
-	rootCmd.PersistentFlags().StringVar(&deviceId, "device", "", "Device ID (get from 'mobilecli devices' command)")
+	rootCmd.PersistentFlags().StringVar(&deviceId, "device", "", "Device ID (get from 'mobilecli devices' command), defaults to $MOBILECLI_DEVICE")
 	rootCmd.PersistentFlags().BoolVar(&insecureStorage, "insecure-storage", false, "store the auth token in a plaintext file instead of the OS keyring (for headless hosts with no keyring)")
 }
 

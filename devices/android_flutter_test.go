@@ -11,7 +11,7 @@ import (
 func TestVisitFailsOnceTheConnectionIsGone(t *testing.T) {
 	vm := newVMWithDeadConnection()
 
-	if _, err := vm.visit("someRenderObject", "RenderParagraph", nil); err == nil {
+	if _, err := vm.visit("someRenderObject", "RenderParagraph", nil, ""); err == nil {
 		t.Error("expected visit to fail after the connection died, got nil error")
 	}
 }
@@ -69,5 +69,49 @@ func TestVMServiceURIPatternExtractsPortAndToken(t *testing.T) {
 func TestVMServiceURIPatternRejectsNonLoopback(t *testing.T) {
 	if vmServiceURIPattern.MatchString("http://10.0.0.5:46809/token/") {
 		t.Error("expected a non-loopback VM service URI to be rejected")
+	}
+}
+
+// a debug (JIT) build reports a double field as kind Double with its decimal
+// text; a profile (AOT) build keeps the field unboxed and reports its raw
+// IEEE-754 bits as kind Int. these are real values from an iPhone profile build.
+func TestDoubleValueReadsBothJITAndAOTEncodings(t *testing.T) {
+	cases := []struct {
+		name string
+		ref  vmInstanceRef
+		want float64
+	}{
+		{"debug build double", vmInstanceRef{Kind: "Double", ValueAsStr: "207.0"}, 207.0},
+		{"debug build zero", vmInstanceRef{Kind: "Double", ValueAsStr: "0.0"}, 0},
+		{"profile build unboxed double", vmInstanceRef{Kind: "Int", ValueAsStr: "4641487181586628608"}, 207.0},
+		{"profile build unboxed zero", vmInstanceRef{Kind: "Int", ValueAsStr: "0"}, 0},
+		{"profile build negative", vmInstanceRef{Kind: "Int", ValueAsStr: "-4598175219545276416"}, -16.0},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got, ok := c.ref.doubleValue()
+			if !ok || got != c.want {
+				t.Fatalf("doubleValue() = %v, %v; want %v", got, ok, c.want)
+			}
+		})
+	}
+
+	if _, ok := (&vmInstanceRef{Kind: "String", ValueAsStr: "hello"}).doubleValue(); ok {
+		t.Error("a non-numeric value must not be read as a double")
+	}
+}
+
+func TestInnermostStringKeyReadsTheNearestKeyInTheCreatorChain(t *testing.T) {
+	cases := map[string]string{
+		"Semantics ← _ButtonStyleState ← ElevatedButton-[<'login-button'>] ← Column-[<'form'>] ← ⋯": "login-button",
+		"RenderParagraph ← Text ← Padding ← ⋯":                                                      "",
+		"Padding-[<42>] ← Row-[GlobalKey#1a2b3] ← ListTile-[<'row 1'>] ← ⋯":                         "row 1",
+		"Text-[<'it'>]": "it",
+		"Semantics ← Chip-[<'tags ← nested'>] ← Column-[<'form'>] ← ⋯": "tags ← nested",
+	}
+	for chain, want := range cases {
+		if got := innermostStringKey(chain); got != want {
+			t.Errorf("innermostStringKey(%q) = %q, want %q", chain, got, want)
+		}
 	}
 }

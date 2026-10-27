@@ -2,6 +2,7 @@ package com.mobilenext.mobilecli;
 
 import android.app.UiAutomation;
 import android.graphics.Rect;
+import android.os.Build;
 import android.util.Log;
 import android.view.accessibility.AccessibilityNodeInfo;
 import android.view.accessibility.AccessibilityWindowInfo;
@@ -34,6 +35,8 @@ class UiTreeSerializer {
 			}
 		}
 
+		clearNodeCache(automation);
+
 		List<AccessibilityNodeInfo> roots = new ArrayList<>();
 		for (AccessibilityWindowInfo window : automation.getWindows()) {
 			// The soft keyboard is noise for most callers: skip IME windows unless asked for a full dump.
@@ -62,6 +65,52 @@ class UiTreeSerializer {
 		} finally {
 			for (AccessibilityNodeInfo root : roots) root.recycle();
 		}
+	}
+
+	// This connection is long-lived, so node reads are served from the framework's
+	// accessibility cache. A walk that races a content change (a Compose LazyRow
+	// swapping placeholders for items) can re-cache the old subtree after the
+	// invalidating event, leaving it stale for good. Always walk a fresh tree.
+	private static void clearNodeCache(UiAutomation automation) {
+		if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+			automation.clearCache();
+			return;
+		}
+		try {
+			Class<?> client = Class.forName("android.view.accessibility.AccessibilityInteractionClient");
+			Object instance = client.getMethod("getInstance").invoke(null);
+			if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+				// Android 13 made the cache per-connection, a release before
+				// UiAutomation.clearCache() became public.
+				Object connectionId = UiAutomation.class.getMethod("getConnectionId").invoke(automation);
+				client.getMethod("clearCache", int.class).invoke(instance, connectionId);
+				return;
+			}
+			client.getMethod("clearCache").invoke(instance);
+		} catch (ReflectiveOperationException e) {
+			Log.w(TAG, "could not clear the accessibility cache; the dump may be stale", e);
+		}
+	}
+
+	// RangeInfo.RANGE_TYPE_INDETERMINATE, added in API 36; we compile against 35
+	private static final int RANGE_TYPE_INDETERMINATE = 3;
+
+	// An indeterminate progress bar has no position, and JSONObject.put throws on
+	// NaN or infinity, which would abort the whole dump.
+	private static boolean hasPosition(AccessibilityNodeInfo.RangeInfo range) {
+		if (range == null || range.getType() == RANGE_TYPE_INDETERMINATE) {
+			return false;
+		}
+		return isFinite(range.getMin()) && isFinite(range.getMax()) && isFinite(range.getCurrent());
+	}
+
+	private static boolean isFinite(float value) {
+		return !Float.isNaN(value) && !Float.isInfinite(value);
+	}
+
+	// via Float.toString so 0.1f is sent as 0.1, not 0.10000000149011612
+	private static double exact(float value) {
+		return Double.parseDouble(Float.toString(value));
 	}
 
 	private static String str(CharSequence cs) {
@@ -100,9 +149,25 @@ class UiTreeSerializer {
 				.put("password", node.isPassword())
 				.put("selected", node.isSelected())
 				.put("visible", node.isVisibleToUser())
+				.put("editable", node.isEditable())
 				.put("rect", new JSONObject()
 						.put("x", bounds.left).put("y", bounds.top)
 						.put("width", bounds.width()).put("height", bounds.height()));
+
+		// A pane title names a window-like region: Material3 sets "Dialog" on an AlertDialog,
+		// "Bottom Sheet" on a ModalBottomSheet. API 28+.
+		if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+			obj.put("pane-title", str(node.getPaneTitle()));
+		}
+
+		// Sliders, progress bars and rating bars report their position here.
+		AccessibilityNodeInfo.RangeInfo range = node.getRangeInfo();
+		if (hasPosition(range)) {
+			obj.put("range", new JSONObject()
+					.put("min", exact(range.getMin()))
+					.put("max", exact(range.getMax()))
+					.put("current", exact(range.getCurrent())));
+		}
 
 		JSONArray children = new JSONArray();
 		for (int i = 0; i < node.getChildCount(); i++) {

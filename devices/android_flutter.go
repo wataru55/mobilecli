@@ -3,6 +3,7 @@ package devices
 import (
 	"encoding/json"
 	"fmt"
+	"math"
 	"regexp"
 	"strconv"
 	"strings"
@@ -24,6 +25,9 @@ import (
 // method call that, unlike `evaluate`, needs no Dart expression compiler and so
 // works on a normally-launched app (no `flutter run`). Each render object's
 // global position comes from invoking RenderBox.localToGlobal(Offset.zero).
+
+// dartKindNull is the VM service kind of an instance ref holding null.
+const dartKindNull = "Null"
 
 const flutterVMCallTimeout = 15 * time.Second
 
@@ -94,15 +98,15 @@ func (d *AndroidDevice) dumpFlutterSource(uri string, source TreeSource) ([]type
 	}
 	devicePort, token := m[1], m[2]
 
-	out, err := d.runAdbCommand("forward", "tcp:0", "tcp:"+devicePort)
+	localPort, err := d.addForward("tcp:" + devicePort)
 	if err != nil {
-		return nil, fmt.Errorf("adb forward to VM service: %s: %w", strings.TrimSpace(string(out)), err)
+		return nil, fmt.Errorf("forward to VM service: %w", err)
 	}
-	localPort, err := strconv.Atoi(strings.TrimSpace(string(out)))
-	if err != nil {
-		return nil, fmt.Errorf("unexpected adb forward output %q: %w", strings.TrimSpace(string(out)), err)
-	}
-	defer d.runAdbCommand("forward", "--remove", fmt.Sprintf("tcp:%d", localPort))
+	defer func() {
+		if _, err := d.runAdbCommand("forward", "--remove", fmt.Sprintf("tcp:%d", localPort)); err != nil {
+			utils.Info("failed to remove adb forward tcp:%d: %v", localPort, err)
+		}
+	}()
 
 	// The device port is now reachable at the forwarded local port.
 	wsURL := fmt.Sprintf("ws://127.0.0.1:%d/%s/ws", localPort, token)
@@ -167,7 +171,7 @@ func dialFlutterVM(wsURL string) (*flutterVM, error) {
 }
 
 func (vm *flutterVM) close() {
-	vm.conn.Close()
+	_ = vm.conn.Close()
 }
 
 func (vm *flutterVM) readLoop() {
@@ -245,10 +249,16 @@ func (vm *flutterVM) call(method string, params map[string]any) (json.RawMessage
 	if params != nil {
 		req["params"] = params
 	}
-	payload, _ := json.Marshal(req)
+	payload, err := json.Marshal(req)
+	if err != nil {
+		vm.mu.Lock()
+		delete(vm.pending, id)
+		vm.mu.Unlock()
+		return nil, fmt.Errorf("encode vm service call %q: %w", method, err)
+	}
 
 	vm.writeMu.Lock()
-	err := vm.conn.WriteMessage(websocket.TextMessage, payload)
+	err = vm.conn.WriteMessage(websocket.TextMessage, payload)
 	vm.writeMu.Unlock()
 	if err != nil {
 		vm.mu.Lock()
@@ -276,9 +286,28 @@ type vmInstanceRef struct {
 	Kind       string `json:"kind"`
 	Name       string `json:"name"` // populated for Class objects (the class name)
 	ValueAsStr string `json:"valueAsString"`
-	ClassRef   *struct {
+	// ValueAsStrTruncated is set when a long String's valueAsString was cut short;
+	// getObject on it returns the full value.
+	ValueAsStrTruncated bool `json:"valueAsStringIsTruncated"`
+	ClassRef            *struct {
 		Name string `json:"name"`
 	} `json:"class"`
+}
+
+// doubleValue reads a Dart double. a debug (JIT) build reports kind Double with
+// the decimal text; a profile (AOT) build keeps double fields unboxed and the VM
+// service reports their raw IEEE-754 bits as kind Int.
+func (r *vmInstanceRef) doubleValue() (float64, bool) {
+	switch r.Kind {
+	case "Double":
+		v, err := strconv.ParseFloat(r.ValueAsStr, 64)
+		return v, err == nil
+	case "Int":
+		bits, err := strconv.ParseInt(r.ValueAsStr, 10, 64)
+		return math.Float64frombits(uint64(bits)), err == nil //nolint:gosec // reinterpreting the bit pattern, not converting a value
+	default:
+		return 0, false
+	}
 }
 
 func (r *vmInstanceRef) className() string {
@@ -413,7 +442,7 @@ func (vm *flutterVM) enableSemantics(bindingClassID string) string {
 	if err != nil {
 		return ""
 	}
-	if vm.invokeString(binding, "get:semanticsEnabled") == "true" {
+	if vm.invokeString(binding, "get:semanticsEnabled") == attrTrue {
 		return "" // already on (e.g. iOS with an active a11y client)
 	}
 	handle, err := vm.invoke(binding, "ensureSemantics", nil)
@@ -461,7 +490,7 @@ func (vm *flutterVM) dumpRenderTree(dpr float64) ([]types.ScreenElement, error) 
 	utils.Verbose("flutter: bootstrap (classes+root+offset.zero) took %s", time.Since(t0))
 
 	t1 := time.Now()
-	els, err := vm.visit(rootID, rootRenderClass, nil)
+	els, err := vm.visit(rootID, rootRenderClass, nil, "")
 	utils.Verbose("flutter: tree walk took %s", time.Since(t1))
 	if err != nil {
 		return nil, err
@@ -571,7 +600,12 @@ func (vm *flutterVM) offsetZeroID(offsetClassID string) (string, error) {
 				return
 			}
 			dx, dy := o.field("_dx"), o.field("_dy")
-			if dx != nil && dy != nil && dx.ValueAsStr == "0.0" && dy.ValueAsStr == "0.0" {
+			if dx == nil || dy == nil {
+				return
+			}
+			x, okX := dx.doubleValue()
+			y, okY := dy.doubleValue()
+			if okX && okY && x == 0 && y == 0 {
 				found[i] = id
 			}
 		}(i, inst.ID)
@@ -593,9 +627,15 @@ func (vm *flutterVM) offsetZeroID(offsetClassID string) (string, error) {
 // A per-node RPC failure is not an error here — plenty of render objects
 // legitimately refuse localToGlobal or describe no children — but a dead
 // connection is, and it must not masquerade as an empty subtree.
-func (vm *flutterVM) visit(nodeID, className string, sem *flutterSemantics) ([]types.ScreenElement, error) {
+func (vm *flutterVM) visit(nodeID, className string, sem *flutterSemantics, key string) ([]types.ScreenElement, error) {
 	if err := vm.fatalErr(); err != nil {
 		return nil, err
+	}
+
+	// Like semantics, the nearest enclosing widget Key is threaded down to the
+	// leaves it covers.
+	if k := vm.readWidgetKey(nodeID); k != "" {
+		key = k
 	}
 
 	// A render object that forms a semantics boundary carries the label/flags on
@@ -605,13 +645,18 @@ func (vm *flutterVM) visit(nodeID, className string, sem *flutterSemantics) ([]t
 	// Adopt it for this subtree so the content leaves beneath (where Flutter has
 	// merged the label away) inherit it.
 	if s := vm.readNodeSemantics(nodeID); s.hasContent() {
+		// Semantics(identifier: …) wrapping a control is its own id-only node
+		// above the control's node — keep the id unless the inner node sets one.
+		if s.identifier == "" && sem != nil {
+			s.identifier = sem.identifier
+		}
 		sem = s
 		// A control or a merging boundary is one accessible element (its label and
 		// widgets belong together), so emit it once here and don't descend —
 		// otherwise its content leaves (a text field's label row, editable area and
 		// container; a checkbox's label and box) each emit separately.
 		if s.isControl() || s.mergesDescendants {
-			return vm.emitLeaf(nodeID, className, sem), nil
+			return vm.emitLeaf(nodeID, className, sem, key), nil
 		}
 	}
 
@@ -627,7 +672,7 @@ func (vm *flutterVM) visit(nodeID, className string, sem *flutterSemantics) ([]t
 			wg.Add(1)
 			go func(i int, k renderChild) {
 				defer wg.Done()
-				results[i], errs[i] = vm.visit(k.id, k.class, sem)
+				results[i], errs[i] = vm.visit(k.id, k.class, sem, key)
 			}(i, k)
 		}
 		wg.Wait()
@@ -643,12 +688,12 @@ func (vm *flutterVM) visit(nodeID, className string, sem *flutterSemantics) ([]t
 		return children, nil
 	}
 
-	return vm.emitLeaf(nodeID, className, sem), nil
+	return vm.emitLeaf(nodeID, className, sem, key), nil
 }
 
 // emitLeaf builds the ScreenElement for a single node (a render leaf, or a
 // merging semantics boundary), or returns nil if it has no on-screen size.
-func (vm *flutterVM) emitLeaf(nodeID, className string, sem *flutterSemantics) []types.ScreenElement {
+func (vm *flutterVM) emitLeaf(nodeID, className string, sem *flutterSemantics, key string) []types.ScreenElement {
 	rect, ok := vm.globalRect(nodeID)
 	if !ok || rect.Width <= 0 || rect.Height <= 0 {
 		return nil
@@ -661,6 +706,7 @@ func (vm *flutterVM) emitLeaf(nodeID, className string, sem *flutterSemantics) [
 		el.Text = &text
 	}
 	applySemantics(&el, sem)
+	setIfNotEmpty(&el.Key, key)
 	return []types.ScreenElement{el}
 }
 
@@ -671,22 +717,23 @@ func applySemantics(el *types.ScreenElement, sem *flutterSemantics) {
 	if !sem.hasContent() {
 		return
 	}
-	if sem.label != "" {
-		label := sem.label
-		el.Label = &label
+	setIfNotEmpty(&el.Label, sem.label)
+	setIfNotEmpty(&el.Value, sem.value)
+	setIfNotEmpty(&el.Identifier, sem.identifier)
+	setIfNotEmpty(&el.Placeholder, sem.hint)
+	applySemanticsState(el, sem)
+	if role := sem.role(); role != "" {
+		el.Type = role
 	}
-	if sem.value != "" {
-		value := sem.value
-		el.Value = &value
+}
+
+func setIfNotEmpty(dst **string, value string) {
+	if value != "" {
+		*dst = &value
 	}
-	if sem.identifier != "" {
-		identifier := sem.identifier
-		el.Identifier = &identifier
-	}
-	if sem.hint != "" {
-		hint := sem.hint
-		el.Placeholder = &hint
-	}
+}
+
+func applySemanticsState(el *types.ScreenElement, sem *flutterSemantics) {
 	// Checkable state: checkbox/radio use isChecked, switches use isToggled. Always
 	// emit it (true or false) so a control's state is unambiguous.
 	if state := sem.checked; state != nil {
@@ -711,26 +758,31 @@ func applySemantics(el *types.ScreenElement, sem *flutterSemantics) {
 		f := false
 		el.Enabled = &f
 	}
-	// Type refinement to roles mobilewright's getByRole understands. A checked- or
-	// toggled-state keeps the node identifiable as a control even when off.
+}
+
+// role refines the element type to roles mobilewright's getByRole understands,
+// or "" to keep the type as is. A checked- or toggled-state keeps the node
+// identifiable as a control even when off.
+func (sem *flutterSemantics) role() string {
 	switch {
 	case sem.isTextField:
-		el.Type = "TextField"
+		return "TextField"
 	case sem.isButton:
-		el.Type = "Button"
+		return "Button"
 	case sem.checked != nil && sem.inRadioGroup:
-		el.Type = "Radio"
+		return "Radio"
 	case sem.checked != nil:
-		el.Type = "Checkbox"
+		return "Checkbox"
 	case sem.toggled != nil:
-		el.Type = "Switch"
+		return "Switch"
 	case sem.isSlider:
-		el.Type = "Slider"
+		return "Slider"
 	case sem.isLink:
-		el.Type = "Link"
+		return "Link"
 	case sem.isHeader:
-		el.Type = "Header"
+		return "Header"
 	}
+	return ""
 }
 
 // readNodeSemantics reads the accessibility metadata attached to a render
@@ -739,13 +791,13 @@ func applySemantics(el *types.ScreenElement, sem *flutterSemantics) {
 func (vm *flutterVM) readNodeSemantics(renderNodeID string) *flutterSemantics {
 	sem := &flutterSemantics{}
 	sn, err := vm.invoke(renderNodeID, "get:debugSemantics", nil)
-	if err != nil || sn == nil || sn.ID == "" || sn.Kind == "Null" {
+	if err != nil || sn == nil || sn.ID == "" || sn.Kind == dartKindNull {
 		return sem
 	}
 	sem.label = vm.invokeString(sn.ID, "get:label")
 	sem.value = vm.invokeString(sn.ID, "get:value")
 	sem.identifier = vm.invokeString(sn.ID, "get:identifier")
-	sem.mergesDescendants = vm.invokeString(sn.ID, "get:mergeAllDescendantsIntoThisNode") == "true"
+	sem.mergesDescendants = vm.invokeString(sn.ID, "get:mergeAllDescendantsIntoThisNode") == attrTrue
 
 	data, err := vm.invoke(sn.ID, "getSemanticsData", nil)
 	if err != nil || data == nil || data.ID == "" {
@@ -788,17 +840,17 @@ func (vm *flutterVM) invokeString(target, selector string) string {
 
 func fieldIsTrue(o *vmInstance, name string) bool {
 	f := o.field(name)
-	return f != nil && f.ValueAsStr == "true"
+	return f != nil && f.ValueAsStr == attrTrue
 }
 
 // triState resolves a SemanticsFlags tri-state member to a *bool. In this Flutter
 // version these are enums (Tristate{true,false,none}, CheckedState{checked,
 // unchecked,mixed}); older versions expose plain bools. none/mixed → nil.
 func (vm *flutterVM) triState(ref *vmInstanceRef) *bool {
-	if ref == nil || ref.ID == "" || ref.Kind == "Null" {
+	if ref == nil || ref.ID == "" || ref.Kind == dartKindNull {
 		return nil
 	}
-	if ref.ValueAsStr == "true" {
+	if ref.ValueAsStr == attrTrue {
 		t := true
 		return &t
 	}
@@ -838,7 +890,7 @@ func (vm *flutterVM) childrenOf(nodeID string) []renderChild {
 			continue
 		}
 		val, err := vm.invoke(node.ID, "get:value", nil)
-		if err != nil || val.ID == "" || val.Kind == "Null" {
+		if err != nil || val.ID == "" || val.Kind == dartKindNull {
 			continue
 		}
 		// debugDescribeChildren only lists children, but guard anyway.
@@ -887,9 +939,9 @@ func (vm *flutterVM) offsetPair(objectID string) (float64, float64, bool) {
 	if dx == nil || dy == nil {
 		return 0, 0, false
 	}
-	x, err1 := strconv.ParseFloat(dx.ValueAsStr, 64)
-	y, err2 := strconv.ParseFloat(dy.ValueAsStr, 64)
-	if err1 != nil || err2 != nil {
+	x, okX := dx.doubleValue()
+	y, okY := dy.doubleValue()
+	if !okX || !okY {
 		return 0, 0, false
 	}
 	return x, y, true

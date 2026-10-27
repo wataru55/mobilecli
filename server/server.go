@@ -294,6 +294,8 @@ func extendedWriteDeadline(method string) (time.Duration, bool) {
 		return 3 * time.Minute, true
 	case "device.screenrecord.stop":
 		return 35 * time.Second, true
+	case "device.dump.ui":
+		return 60 * time.Second, true
 	}
 	return 0, false
 }
@@ -329,7 +331,9 @@ func handleJSONRPC(w http.ResponseWriter, r *http.Request) {
 	// slow device-side call can't trip the default WriteTimeout and close the
 	// connection mid-response (which the caller sees as an EOF).
 	if d, ok := extendedWriteDeadline(req.Method); ok {
-		_ = http.NewResponseController(w).SetWriteDeadline(time.Now().Add(d))
+		if err := http.NewResponseController(w).SetWriteDeadline(time.Now().Add(d)); err != nil {
+			utils.Verbose("failed to extend write deadline: %v", err)
+		}
 	}
 
 	if req.Method == "" {
@@ -359,7 +363,9 @@ func sendJSONRPCResponse(w http.ResponseWriter, id any, result any) {
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(response)
+	if err := json.NewEncoder(w).Encode(response); err != nil {
+		utils.Verbose("failed to write response: %v", err)
+	}
 }
 
 func handleDevicesList(params json.RawMessage) (any, error) {
@@ -403,7 +409,7 @@ func handleScreenshot(params json.RawMessage) (any, error) {
 	}
 
 	response := commands.ScreenshotCommand(req)
-	if response.Status == "error" {
+	if response.Status == statusError {
 		return nil, fmt.Errorf("%s", response.Error)
 	}
 
@@ -466,11 +472,7 @@ func handleIoTap(params json.RawMessage) (any, error) {
 	}
 
 	response := commands.TapCommand(req)
-	if response.Status == "error" {
-		return nil, fmt.Errorf("%s", response.Error)
-	}
-
-	return okResponse, nil
+	return okResult(response)
 }
 
 func handleIoLongPress(params json.RawMessage) (any, error) {
@@ -497,11 +499,7 @@ func handleIoLongPress(params json.RawMessage) (any, error) {
 	}
 
 	response := commands.LongPressCommand(req)
-	if response.Status == "error" {
-		return nil, fmt.Errorf("%s", response.Error)
-	}
-
-	return okResponse, nil
+	return okResult(response)
 }
 
 func handleIoSwipe(params json.RawMessage) (any, error) {
@@ -541,11 +539,7 @@ func handleIoSwipe(params json.RawMessage) (any, error) {
 	}
 
 	response := commands.SwipeCommand(req)
-	if response.Status == "error" {
-		return nil, fmt.Errorf("%s", response.Error)
-	}
-
-	return okResponse, nil
+	return okResult(response)
 }
 
 func handleIoPinch(params json.RawMessage) (any, error) {
@@ -582,11 +576,7 @@ func handleIoPinch(params json.RawMessage) (any, error) {
 	}
 
 	response := commands.PinchCommand(req)
-	if response.Status == "error" {
-		return nil, fmt.Errorf("%s", response.Error)
-	}
-
-	return okResponse, nil
+	return okResult(response)
 }
 
 type ClipboardGetParams struct {
@@ -630,11 +620,7 @@ func handleClipboardSet(params json.RawMessage) (any, error) {
 		DeviceID: clipboardParams.DeviceID,
 		Text:     *clipboardParams.Text,
 	})
-	if response.Status == "error" {
-		return nil, fmt.Errorf("%s", response.Error)
-	}
-
-	return okResponse, nil
+	return okResult(response)
 }
 
 type IoTextParams struct {
@@ -658,11 +644,7 @@ func handleIoText(params json.RawMessage) (any, error) {
 	}
 
 	response := commands.TextCommand(req)
-	if response.Status == "error" {
-		return nil, fmt.Errorf("%s", response.Error)
-	}
-
-	return okResponse, nil
+	return okResult(response)
 }
 
 type IoKeysParams struct {
@@ -686,11 +668,35 @@ func handleIoKeys(params json.RawMessage) (any, error) {
 	}
 
 	response := commands.KeysCommand(req)
-	if response.Status == "error" {
-		return nil, fmt.Errorf("%s", response.Error)
+	return okResult(response)
+}
+
+type IoFillParams struct {
+	DeviceID string `json:"deviceId"`
+	// a pointer, so a missing text is told apart from "", which clears the field
+	Text *string `json:"text"`
+}
+
+func handleIoFill(params json.RawMessage) (any, error) {
+	if len(params) == 0 {
+		return nil, fmt.Errorf("'params' is required with fields: deviceId, text")
 	}
 
-	return okResponse, nil
+	var ioFillParams IoFillParams
+	if err := json.Unmarshal(params, &ioFillParams); err != nil {
+		return nil, fmt.Errorf("invalid parameters: %w. Expected fields: deviceId, text", err)
+	}
+	if ioFillParams.Text == nil {
+		return nil, fmt.Errorf("'text' is required; pass \"\" to clear the field")
+	}
+
+	req := commands.FillRequest{
+		DeviceID: ioFillParams.DeviceID,
+		Text:     *ioFillParams.Text,
+	}
+
+	response := commands.FillCommand(req)
+	return okResult(response)
 }
 
 type IoButtonParams struct {
@@ -736,6 +742,7 @@ type LocationClearParams struct {
 type DeviceSettingsApplyParams struct {
 	DeviceID   string  `json:"deviceId"`
 	Animations *string `json:"animations,omitempty"` // "on" or "off"
+	Appearance *string `json:"appearance,omitempty"` // "light" or "dark"
 }
 
 type DeviceBootParams struct {
@@ -799,6 +806,8 @@ type ScreenRecordParams struct {
 	DeviceID  string `json:"deviceId"`
 	Output    string `json:"output"`
 	TimeLimit int    `json:"timeLimit"`
+	// RecordingID names the recording for a later stop; generated when empty
+	RecordingID string `json:"recordingId,omitempty"`
 }
 
 func handleIoButton(params json.RawMessage) (any, error) {
@@ -817,11 +826,7 @@ func handleIoButton(params json.RawMessage) (any, error) {
 	}
 
 	response := commands.ButtonCommand(req)
-	if response.Status == "error" {
-		return nil, fmt.Errorf("%s", response.Error)
-	}
-
-	return okResponse, nil
+	return okResult(response)
 }
 
 func handleIoGesture(params json.RawMessage) (any, error) {
@@ -840,11 +845,7 @@ func handleIoGesture(params json.RawMessage) (any, error) {
 	}
 
 	response := commands.GestureCommand(req)
-	if response.Status == "error" {
-		return nil, fmt.Errorf("%s", response.Error)
-	}
-
-	return okResponse, nil
+	return okResult(response)
 }
 
 func handleURL(params json.RawMessage) (any, error) {
@@ -863,11 +864,7 @@ func handleURL(params json.RawMessage) (any, error) {
 	}
 
 	response := commands.URLCommand(req)
-	if response.Status == "error" {
-		return nil, fmt.Errorf("%s", response.Error)
-	}
-
-	return okResponse, nil
+	return okResult(response)
 }
 
 func handleDeviceInfo(params json.RawMessage) (any, error) {
@@ -930,11 +927,25 @@ func handleIoOrientationSet(params json.RawMessage) (any, error) {
 	}
 
 	response := commands.OrientationSetCommand(req)
-	if response.Status == "error" {
-		return nil, fmt.Errorf("%s", response.Error)
+	return okResult(response)
+}
+
+func handleFoldSet(params json.RawMessage) (any, error) {
+	if len(params) == 0 {
+		return nil, fmt.Errorf("'params' is required with fields: deviceId, state")
 	}
 
-	return okResponse, nil
+	var req commands.FoldRequest
+	if err := json.Unmarshal(params, &req); err != nil {
+		return nil, fmt.Errorf("invalid parameters: %w. Expected fields: deviceId, state", err)
+	}
+
+	if req.DeviceID == "" {
+		return nil, fmt.Errorf("'deviceId' is required")
+	}
+
+	response := commands.FoldCommand(req)
+	return okResult(response)
 }
 
 func handleLocationSet(params json.RawMessage) (any, error) {
@@ -976,11 +987,7 @@ func handleLocationClear(params json.RawMessage) (any, error) {
 	}
 
 	response := commands.LocationClearCommand(req)
-	if response.Status == "error" {
-		return nil, fmt.Errorf("%s", response.Error)
-	}
-
-	return okResponse, nil
+	return okResult(response)
 }
 
 func handleSettingsApply(params json.RawMessage) (any, error) {
@@ -990,20 +997,17 @@ func handleSettingsApply(params json.RawMessage) (any, error) {
 
 	var settingsParams DeviceSettingsApplyParams
 	if err := json.Unmarshal(params, &settingsParams); err != nil {
-		return nil, fmt.Errorf("invalid parameters: %w. Expected fields: deviceId, animations", err)
+		return nil, fmt.Errorf("invalid parameters: %w. Expected fields: deviceId, animations, appearance", err)
 	}
 
 	req := commands.ApplySettingsRequest{
 		DeviceID:   settingsParams.DeviceID,
 		Animations: settingsParams.Animations,
+		Appearance: settingsParams.Appearance,
 	}
 
 	response := commands.ApplySettingsCommand(req)
-	if response.Status == "error" {
-		return nil, fmt.Errorf("%s", response.Error)
-	}
-
-	return okResponse, nil
+	return okResult(response)
 }
 
 func handleDeviceBoot(params json.RawMessage) (any, error) {
@@ -1229,12 +1233,6 @@ func handleAppsUninstall(params json.RawMessage) (any, error) {
 	return commandResult(response)
 }
 
-// screenRecordReadyTimeout bounds how long handleScreenRecord waits for the
-// recording to be confirmed live before giving up. Sized generously above a
-// worst-case cold DeviceKit start on real iOS devices (WDA/app launch +
-// two 10s broadcast-picker button polls + the 5s post-click TCP wait).
-const screenRecordReadyTimeout = 60 * time.Second
-
 func handleScreenRecord(params json.RawMessage) (any, error) {
 	if len(params) == 0 {
 		return nil, fmt.Errorf("'params' is required with fields: deviceId, output")
@@ -1242,101 +1240,30 @@ func handleScreenRecord(params json.RawMessage) (any, error) {
 
 	var p ScreenRecordParams
 	if err := json.Unmarshal(params, &p); err != nil {
-		return nil, fmt.Errorf("invalid parameters: %w. Expected fields: deviceId, output", err)
+		return nil, fmt.Errorf("invalid parameters: %w. Expected fields: deviceId, output, recordingId (optional)", err)
 	}
 
-	if p.Output == "" {
-		return nil, fmt.Errorf("'output' is required")
-	}
-
-	session, err := recorder.start(p.Output)
-	if err != nil {
-		return nil, err
-	}
-
-	req := commands.ScreenRecordRequest{
-		DeviceID:   p.DeviceID,
-		OutputPath: p.Output,
-		TimeLimit:  p.TimeLimit,
-		StopChan:   session.StopChan,
-		Ready:      session.Ready,
-		Silent:     true,
-	}
-
-	go func() {
-		resp := commands.ScreenRecordCommand(req)
-		session.Done <- resp
-	}()
-
-	// Don't ack until the recording is actually confirmed live. On real iOS
-	// devices this waits for the ReplayKit broadcast picker to be clicked, so
-	// callers never race a still-starting recording with device commands.
-	select {
-	case readyErr := <-session.Ready:
-		if readyErr != nil {
-			recorder.clear()
-			return nil, fmt.Errorf("failed to start recording: %w", readyErr)
-		}
-		return map[string]any{
-			"status": "recording",
-			"output": p.Output,
-		}, nil
-	case resp := <-session.Done:
-		// recording finished (or failed) before ever confirming it was live
-		recorder.clear()
-		if resp.Status == "error" {
-			return nil, fmt.Errorf("%s", resp.Error)
-		}
-		return nil, fmt.Errorf("recording ended before it was confirmed started")
-	case <-time.After(screenRecordReadyTimeout):
-		// the command goroutine may still be starting (or even recording);
-		// ask it to stop and wait for it to exit before freeing the session,
-		// so it cannot overlap a subsequent capture
-		if _, stopErr := recorder.stop(); stopErr == nil {
-			select {
-			case <-session.Done:
-			case <-time.After(30 * time.Second):
-			}
-		}
-
-		recorder.clear()
-		return nil, fmt.Errorf("timed out waiting for recording to start")
-	}
+	return recorder.start(p)
 }
 
 // ScreenRecordStopParams represents the parameters for stopping a screen recording
 type ScreenRecordStopParams struct {
-	DeviceID string `json:"deviceId"`
+	DeviceID    string `json:"deviceId"`
+	RecordingID string `json:"recordingId,omitempty"`
 }
 
 func handleScreenRecordStop(params json.RawMessage) (any, error) {
-	session, err := recorder.stop()
-	if err != nil {
-		return nil, err
-	}
-	defer recorder.clear()
-
-	// wait for recording to finalize with a timeout
-	select {
-	case resp := <-session.Done:
-		if resp.Status == "error" {
-			return nil, fmt.Errorf("%s", resp.Error)
+	var p ScreenRecordStopParams
+	if len(params) > 0 {
+		if err := json.Unmarshal(params, &p); err != nil {
+			return nil, fmt.Errorf("invalid parameters: %w. Expected fields: deviceId (optional), recordingId (optional)", err)
 		}
-		return enrichWithDuration(resp.Data, session.StartedAt), nil
-	case <-time.After(30 * time.Second):
-		return nil, fmt.Errorf("timeout waiting for recording to finalize")
 	}
-}
 
-func enrichWithDuration(data any, startedAt time.Time) any {
-	m, ok := data.(commands.ScreenRecordResponse)
-	if !ok {
-		return data
+	if p.RecordingID != "" {
+		return recorder.stopOne(p.RecordingID, p.DeviceID)
 	}
-	if m.Duration == "" {
-		m.Duration = time.Since(startedAt).Round(time.Millisecond).String()
-	}
-	return m
+	return recorder.stopAll(p.DeviceID)
 }
 
 type CrashesListParams struct {
@@ -1409,12 +1336,16 @@ func sendJSONRPCError(w http.ResponseWriter, id any, code int, message string, d
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(response)
+	if err := json.NewEncoder(w).Encode(response); err != nil {
+		utils.Verbose("failed to write response: %v", err)
+	}
 }
 
 func sendBanner(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(okResponse)
+	if err := json.NewEncoder(w).Encode(okResponse); err != nil {
+		utils.Verbose("failed to write response: %v", err)
+	}
 }
 
 // newJsonRpcNotification creates a JSON-RPC notification message
@@ -1429,26 +1360,70 @@ func newJsonRpcNotification(message string) map[string]any {
 }
 
 // handleScreenCaptureSession creates a streaming session and returns sessionUrl
+// withScreenCaptureDefaults validates a screen capture request and returns it
+// with the omitted format, quality, scale and fps filled in.
+func withScreenCaptureDefaults(req commands.ScreenCaptureRequest) (commands.ScreenCaptureRequest, error) {
+	if req.Format == "" {
+		req.Format = devices.FormatMJPEG
+	}
+	if req.Format != devices.FormatMJPEG && req.Format != devices.FormatAVC {
+		return req, fmt.Errorf("format must be 'mjpeg' or 'avc' for screen capture")
+	}
+
+	// 0 means omitted, negative is never valid
+	if req.FPS < 0 {
+		return req, fmt.Errorf("fps must not be negative")
+	}
+
+	if req.Quality == 0 {
+		req.Quality = devices.DefaultQuality
+	}
+	if req.Scale == 0.0 {
+		req.Scale = devices.DefaultScale
+	}
+	if req.FPS == 0 {
+		req.FPS = devices.DefaultFramerate
+	}
+	return req, nil
+}
+
+// mjpegProgressWriter sends progress messages as JSON-RPC notifications through the MJPEG stream.
+func mjpegProgressWriter(w http.ResponseWriter) func(string) {
+	return func(message string) {
+		notification := newJsonRpcNotification(message)
+		statusJSON, err := json.Marshal(notification)
+		if err != nil {
+			log.Printf("Failed to marshal progress message: %v", err)
+			return
+		}
+		mimeMessage := fmt.Sprintf("--BoundaryString\r\nContent-Type: application/json\r\nContent-Length: %d\r\n\r\n%s\r\n", len(statusJSON), statusJSON)
+		streamWriter(w)([]byte(mimeMessage))
+	}
+}
+
+// streamWriter writes and flushes each chunk; it reports false once the viewer is gone.
+func streamWriter(w http.ResponseWriter) func([]byte) bool {
+	return func(data []byte) bool {
+		if _, err := w.Write(data); err != nil {
+			utils.Verbose("failed to write stream data: %v", err)
+			return false
+		}
+		if flusher, ok := w.(http.Flusher); ok {
+			flusher.Flush()
+		}
+		return true
+	}
+}
+
 func handleScreenCaptureSession(params json.RawMessage) (any, error) {
 	var screenCaptureParams commands.ScreenCaptureRequest
 	if err := json.Unmarshal(params, &screenCaptureParams); err != nil {
 		return nil, fmt.Errorf("invalid parameters: %w", err)
 	}
 
-	// set default format if not provided
-	if screenCaptureParams.Format == "" {
-		screenCaptureParams.Format = "mjpeg"
-	}
-
-	// validate format
-	if screenCaptureParams.Format != "mjpeg" && screenCaptureParams.Format != "avc" {
-		return nil, fmt.Errorf("format must be 'mjpeg' or 'avc' for screen capture")
-	}
-
-	// validate fps before any device work — 0 means omitted (defaulted below),
-	// negative is never valid
-	if screenCaptureParams.FPS < 0 {
-		return nil, fmt.Errorf("fps must not be negative")
+	screenCaptureParams, err := withScreenCaptureDefaults(screenCaptureParams)
+	if err != nil {
+		return nil, err
 	}
 
 	// validate device exists (early error detection)
@@ -1458,7 +1433,7 @@ func handleScreenCaptureSession(params json.RawMessage) (any, error) {
 	}
 
 	// avc format validation based on device type
-	if screenCaptureParams.Format == "avc" {
+	if screenCaptureParams.Format == devices.FormatAVC {
 		if target.Platform == "ios" && target.Type == "simulator" {
 			return nil, fmt.Errorf("avc format is not supported on iOS simulators")
 		}
@@ -1467,22 +1442,6 @@ func handleScreenCaptureSession(params json.RawMessage) (any, error) {
 	// ensure session manager is initialized for non-server Execute usage
 	if sessionManager == nil {
 		sessionManager = &SessionManager{sessions: make(map[string]*StreamSession)}
-	}
-
-	// set defaults for quality and scale
-	quality := screenCaptureParams.Quality
-	if quality == 0 {
-		quality = devices.DefaultQuality
-	}
-
-	scale := screenCaptureParams.Scale
-	if scale == 0.0 {
-		scale = devices.DefaultScale
-	}
-
-	fps := screenCaptureParams.FPS
-	if fps == 0 {
-		fps = devices.DefaultFramerate
 	}
 
 	// generate session ID
@@ -1494,9 +1453,9 @@ func handleScreenCaptureSession(params json.RawMessage) (any, error) {
 		DeviceID:  target.ID,
 		Type:      sessionTypeStream,
 		Format:    screenCaptureParams.Format,
-		Quality:   quality,
-		Scale:     scale,
-		FPS:       fps,
+		Quality:   screenCaptureParams.Quality,
+		Scale:     screenCaptureParams.Scale,
+		FPS:       screenCaptureParams.FPS,
 		CreatedAt: time.Now(),
 		ExpiresAt: time.Now().Add(1 * time.Minute),
 		InUse:     false,
@@ -1686,7 +1645,9 @@ func handleLogsStream(w http.ResponseWriter, r *http.Request) {
 	defer sessionManager.RemoveSession(session.ID)
 
 	// set extended write deadline for long-running stream
-	_ = http.NewResponseController(w).SetWriteDeadline(time.Now().Add(10 * time.Minute))
+	if err := http.NewResponseController(w).SetWriteDeadline(time.Now().Add(10 * time.Minute)); err != nil {
+		utils.Verbose("failed to extend write deadline: %v", err)
+	}
 
 	w.Header().Set("Content-Type", "application/x-ndjson")
 	w.Header().Set("Cache-Control", "no-cache")
@@ -1717,10 +1678,12 @@ func handleStream(w http.ResponseWriter, r *http.Request) {
 	defer sessionManager.RemoveSession(sessionID)
 
 	// set extended write deadline for long-running stream
-	_ = http.NewResponseController(w).SetWriteDeadline(time.Now().Add(10 * time.Minute))
+	if err := http.NewResponseController(w).SetWriteDeadline(time.Now().Add(10 * time.Minute)); err != nil {
+		utils.Verbose("failed to extend write deadline: %v", err)
+	}
 
 	// set streaming headers based on format
-	if session.Format == "mjpeg" {
+	if session.Format == devices.FormatMJPEG {
 		w.Header().Set("Content-Type", "multipart/x-mixed-replace; boundary=BoundaryString")
 	} else {
 		// avc format
@@ -1732,7 +1695,7 @@ func handleStream(w http.ResponseWriter, r *http.Request) {
 
 	// progress messages are only representable inside the MJPEG multipart stream
 	var onProgress func(string)
-	if session.Format == "mjpeg" {
+	if session.Format == devices.FormatMJPEG {
 		onProgress = func(message string) {
 			statusJSON, err := json.Marshal(newJsonRpcNotification(message))
 			if err != nil {
@@ -1740,7 +1703,9 @@ func handleStream(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			mimeMessage := fmt.Sprintf("--BoundaryString\r\nContent-Type: application/json\r\nContent-Length: %d\r\n\r\n%s\r\n", len(statusJSON), statusJSON)
-			_, _ = flushWriter{w: w}.Write([]byte(mimeMessage))
+			if _, err := (flushWriter{w: w}).Write([]byte(mimeMessage)); err != nil {
+				utils.Verbose("failed to write status message: %v", err)
+			}
 		}
 	}
 
@@ -1761,27 +1726,18 @@ func handleStream(w http.ResponseWriter, r *http.Request) {
 
 func handleScreenCapture(r *http.Request, w http.ResponseWriter, params json.RawMessage) error {
 
-	_ = http.NewResponseController(w).SetWriteDeadline(time.Now().Add(10 * time.Minute))
+	if err := http.NewResponseController(w).SetWriteDeadline(time.Now().Add(10 * time.Minute)); err != nil {
+		utils.Verbose("failed to extend write deadline: %v", err)
+	}
 
 	var screenCaptureParams commands.ScreenCaptureRequest
 	if err := json.Unmarshal(params, &screenCaptureParams); err != nil {
 		return fmt.Errorf("invalid parameters: %w", err)
 	}
 
-	// Set default format if not provided
-	if screenCaptureParams.Format == "" {
-		screenCaptureParams.Format = "mjpeg"
-	}
-
-	// Validate format
-	if screenCaptureParams.Format != "mjpeg" && screenCaptureParams.Format != "avc" {
-		return fmt.Errorf("format must be 'mjpeg' or 'avc' for screen capture")
-	}
-
-	// validate fps before any device work — 0 means omitted (defaulted below),
-	// negative is never valid
-	if screenCaptureParams.FPS < 0 {
-		return fmt.Errorf("fps must not be negative")
+	screenCaptureParams, err := withScreenCaptureDefaults(screenCaptureParams)
+	if err != nil {
+		return err
 	}
 
 	// Find the target device
@@ -1791,30 +1747,14 @@ func handleScreenCapture(r *http.Request, w http.ResponseWriter, params json.Raw
 	}
 
 	// avc format is supported on Android and iOS real devices (not simulators)
-	if screenCaptureParams.Format == "avc" {
+	if screenCaptureParams.Format == devices.FormatAVC {
 		if targetDevice.Platform() == "ios" && targetDevice.DeviceType() == "simulator" {
 			return fmt.Errorf("avc format is not supported on iOS simulators")
 		}
 	}
 
-	// Set defaults if not provided
-	quality := screenCaptureParams.Quality
-	if quality == 0 {
-		quality = devices.DefaultQuality
-	}
-
-	scale := screenCaptureParams.Scale
-	if scale == 0.0 {
-		scale = devices.DefaultScale
-	}
-
-	fps := screenCaptureParams.FPS
-	if fps == 0 {
-		fps = devices.DefaultFramerate
-	}
-
 	// Set headers for streaming response based on format
-	if screenCaptureParams.Format == "mjpeg" {
+	if screenCaptureParams.Format == devices.FormatMJPEG {
 		w.Header().Set("Content-Type", "multipart/x-mixed-replace; boundary=BoundaryString")
 	} else {
 		// avc format
@@ -1827,20 +1767,8 @@ func handleScreenCapture(r *http.Request, w http.ResponseWriter, params json.Raw
 	// progress callback sends JSON-RPC notifications through the MJPEG stream
 	// only used for MJPEG format, not for AVC
 	var progressCallback func(string)
-	if screenCaptureParams.Format == "mjpeg" {
-		progressCallback = func(message string) {
-			notification := newJsonRpcNotification(message)
-			statusJSON, err := json.Marshal(notification)
-			if err != nil {
-				log.Printf("Failed to marshal progress message: %v", err)
-				return
-			}
-			mimeMessage := fmt.Sprintf("--BoundaryString\r\nContent-Type: application/json\r\nContent-Length: %d\r\n\r\n%s\r\n", len(statusJSON), statusJSON)
-			_, _ = w.Write([]byte(mimeMessage))
-			if flusher, ok := w.(http.Flusher); ok {
-				flusher.Flush()
-			}
-		}
+	if screenCaptureParams.Format == devices.FormatMJPEG {
+		progressCallback = mjpegProgressWriter(w)
 	}
 
 	err = targetDevice.StartAgent(devices.StartAgentConfig{
@@ -1851,26 +1779,22 @@ func handleScreenCapture(r *http.Request, w http.ResponseWriter, params json.Raw
 		return fmt.Errorf("error starting agent: %w", err)
 	}
 
+	// a write only fails once a frame arrives; on a static screen a viewer that
+	// went away would otherwise stay subscribed to the stream. r is nil in tests.
+	var viewerGone <-chan struct{}
+	if r != nil {
+		viewerGone = r.Context().Done()
+	}
+
 	// start screen capture and stream to the response writer
 	err = targetDevice.StartScreenCapture(devices.ScreenCaptureConfig{
 		Format:     screenCaptureParams.Format,
-		Quality:    quality,
-		Scale:      scale,
-		FPS:        fps,
+		Quality:    screenCaptureParams.Quality,
+		Scale:      screenCaptureParams.Scale,
+		FPS:        screenCaptureParams.FPS,
 		OnProgress: progressCallback,
-		OnData: func(data []byte) bool {
-			_, writeErr := w.Write(data)
-			if writeErr != nil {
-				fmt.Println("Error writing data:", writeErr)
-				return false
-			}
-
-			if flusher, ok := w.(http.Flusher); ok {
-				flusher.Flush()
-			}
-
-			return true
-		},
+		StopChan:   viewerGone,
+		OnData:     streamWriter(w),
 	})
 
 	if err != nil {
@@ -1965,7 +1889,7 @@ func handleFsPull(params json.RawMessage) (any, error) {
 		DeviceID:   p.DeviceID,
 		RemotePath: p.RemotePath,
 	})
-	if statResp.Status == "error" {
+	if statResp.Status == statusError {
 		return nil, fmt.Errorf("%s", statResp.Error)
 	}
 	if entries, ok := statResp.Data.([]devices.FileEntry); ok && len(entries) == 1 {
@@ -1985,15 +1909,15 @@ func handleFsPull(params json.RawMessage) (any, error) {
 		return nil, fmt.Errorf("failed to create temp file: %w", err)
 	}
 	tmpPath := tmp.Name()
-	tmp.Close()
-	defer os.Remove(tmpPath)
+	_ = tmp.Close()
+	defer func() { _ = os.Remove(tmpPath) }()
 
 	response := commands.FsPullCommand(commands.FsPullRequest{
 		DeviceID:   p.DeviceID,
 		RemotePath: p.RemotePath,
 		LocalPath:  tmpPath,
 	})
-	if response.Status == "error" {
+	if response.Status == statusError {
 		return nil, fmt.Errorf("%s", response.Error)
 	}
 
@@ -2036,12 +1960,14 @@ func handleFsPush(params json.RawMessage) (any, error) {
 		return nil, fmt.Errorf("failed to create temp file: %w", err)
 	}
 	tmpPath := tmp.Name()
-	defer os.Remove(tmpPath)
+	defer func() { _ = os.Remove(tmpPath) }()
 	if _, err := tmp.Write(data); err != nil {
-		tmp.Close()
+		_ = tmp.Close()
 		return nil, fmt.Errorf("failed to write temp file: %w", err)
 	}
-	tmp.Close()
+	if err := tmp.Close(); err != nil {
+		return nil, fmt.Errorf("failed to write temp file: %w", err)
+	}
 
 	response := commands.FsPushCommand(commands.FsPushRequest{
 		DeviceID:   p.DeviceID,
@@ -2087,10 +2013,19 @@ func handleFsRm(params json.RawMessage) (any, error) {
 	return commandResult(response)
 }
 
+// okResult is commandResult for commands whose success carries no data.
+func okResult(response *commands.CommandResponse) (any, error) {
+	if response.Status == statusError {
+		return nil, fmt.Errorf("%s", response.Error)
+	}
+
+	return okResponse, nil
+}
+
 // commandResult converts a command response into the (result, error) pair a
 // json-rpc handler returns.
 func commandResult(response *commands.CommandResponse) (any, error) {
-	if response.Status == "error" {
+	if response.Status == statusError {
 		return nil, fmt.Errorf("%s", response.Error)
 	}
 

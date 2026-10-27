@@ -1,14 +1,17 @@
 package devices
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
-	"strconv"
 	"strings"
 	"time"
 
 	"github.com/mobile-next/mobilecli/agents"
+	"github.com/mobile-next/mobilecli/utils"
 )
 
 // WebViewInfo describes an embedded WebView found inside a running app.
@@ -24,25 +27,38 @@ type WebViewInfo struct {
 
 const agentSubDir = "mobilecli"
 
+var errAppNotDebuggable = errors.New("webview injection requires a debug build")
+
 // pushTempFile writes data to a host temp file then pushes it to the device
 // at remotePath using adb push.
-func (d *AndroidDevice) pushTempFile(data []byte, remotePath string) error {
+func (d *AndroidDevice) pushTempFile(data []byte, remotePath string) (err error) {
 	tmp, err := os.CreateTemp("", "mobilecli-agent-*")
 	if err != nil {
 		return fmt.Errorf("create temp file: %w", err)
 	}
-	defer os.Remove(tmp.Name())
+	defer func() { _ = os.Remove(tmp.Name()) }()
 
 	if _, err := tmp.Write(data); err != nil {
-		tmp.Close()
+		_ = tmp.Close()
 		return fmt.Errorf("write temp file: %w", err)
 	}
-	tmp.Close()
+	if err := tmp.Close(); err != nil {
+		return fmt.Errorf("write temp file: %w", err)
+	}
 
 	// push to a sibling then rename: a process that has the old file mapped
 	// (a running DeviceServer or capture stream) keeps its inode instead of
 	// seeing the bytes change underneath it
-	staging := remotePath + ".tmp"
+	staging, err := stagingPathFor(remotePath)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if err != nil {
+			d.removeStaging(staging)
+		}
+	}()
+
 	out, err := d.runAdbCommand("push", tmp.Name(), staging)
 	if err != nil {
 		return fmt.Errorf("adb push to %s: %s: %w", staging, strings.TrimSpace(string(out)), err)
@@ -51,6 +67,30 @@ func (d *AndroidDevice) pushTempFile(data []byte, remotePath string) error {
 		return fmt.Errorf("move %s into place: %s: %w", remotePath, strings.TrimSpace(string(out)), err)
 	}
 	return nil
+}
+
+// stagingPathFor returns a sibling of dest that no other install is using.
+//
+// A fixed "<dest>.tmp" is shared by every install of that file, so two at once
+// move or chmod each other's staging file away. A lock would only cover this
+// process, and a mobilewright server and a CLI are two. A name nobody else has
+// needs no lock.
+func stagingPathFor(dest string) (string, error) {
+	suffix := make([]byte, 8)
+	if _, err := rand.Read(suffix); err != nil {
+		return "", fmt.Errorf("name staging file for %s: %w", dest, err)
+	}
+	return dest + "." + hex.EncodeToString(suffix) + ".tmp", nil
+}
+
+// removeStaging deletes a staging file left by a failed install, since its
+// name is never reused and nothing would overwrite it. runAs is the optional
+// "run-as <pkg>" prefix for a file inside an app's data directory.
+func (d *AndroidDevice) removeStaging(staging string, runAs ...string) {
+	args := append(append([]string{"shell"}, runAs...), "rm", "-f", staging)
+	if out, err := d.runAdbCommand(args...); err != nil {
+		utils.Verbose("failed to remove staging file %s: %s: %v", staging, strings.TrimSpace(string(out)), err)
+	}
 }
 
 // getAppDataDir returns the data directory of the given package by running
@@ -70,15 +110,33 @@ func (d *AndroidDevice) getAppDataDir(pkg string) (string, error) {
 
 // copyToAppDir copies a file from /data/local/tmp into the app's data directory
 // using run-as, then sets the given chmod mode.
-func (d *AndroidDevice) copyToAppDir(pkg, tmpPath, destPath, mode string) error {
+//
+// The copy is staged next to destPath and renamed into place. The app may
+// still have the previous file mapped (an agent attached earlier), and writing
+// over that inode discards its relocated pages: the next call into the mapped
+// agent jumps to a raw link-time address and the app dies with SIGSEGV.
+func (d *AndroidDevice) copyToAppDir(pkg, tmpPath, destPath, mode string) (err error) {
 	if out, err := d.runAdbCommand("shell", "run-as", pkg, "mkdir", "-p", destPath[:strings.LastIndex(destPath, "/")]); err != nil {
 		return fmt.Errorf("mkdir in app dir: %s: %w", strings.TrimSpace(string(out)), err)
 	}
-	if out, err := d.runAdbCommand("shell", "run-as", pkg, "cp", tmpPath, destPath); err != nil {
+	staging, err := stagingPathFor(destPath)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if err != nil {
+			d.removeStaging(staging, "run-as", pkg)
+		}
+	}()
+
+	if out, err := d.runAdbCommand("shell", "run-as", pkg, "cp", tmpPath, staging); err != nil {
 		return fmt.Errorf("cp to app dir: %s: %w", strings.TrimSpace(string(out)), err)
 	}
-	if out, err := d.runAdbCommand("shell", "run-as", pkg, "chmod", mode, destPath); err != nil {
-		return fmt.Errorf("chmod %s %s: %s: %w", mode, destPath, strings.TrimSpace(string(out)), err)
+	if out, err := d.runAdbCommand("shell", "run-as", pkg, "chmod", mode, staging); err != nil {
+		return fmt.Errorf("chmod %s %s: %s: %w", mode, staging, strings.TrimSpace(string(out)), err)
+	}
+	if out, err := d.runAdbCommand("shell", "run-as", pkg, "mv", "-f", staging, destPath); err != nil {
+		return fmt.Errorf("move %s into place: %s: %w", destPath, strings.TrimSpace(string(out)), err)
 	}
 	return nil
 }
@@ -104,8 +162,6 @@ func (d *AndroidDevice) installWebViewKit(pkg string) (string, error) {
 	if err := d.pushTempFile(agents.AndroidMobilecliDEX, androidDexPath); err != nil {
 		return "", fmt.Errorf("push .dex: %w", err)
 	}
-	// remove stale dex before copying (dex is immutable once loaded)
-	d.runAdbCommand("shell", "run-as", pkg, "rm", "-f", agentDir+"/mobilecli.dex")
 	if err := d.copyToAppDir(pkg, androidDexPath, agentDir+"/mobilecli.dex", "444"); err != nil {
 		return "", fmt.Errorf("install .dex: %w", err)
 	}
@@ -113,18 +169,15 @@ func (d *AndroidDevice) installWebViewKit(pkg string) (string, error) {
 	return agentDir, nil
 }
 
+// webViewSocketTarget is the abstract socket the in-app agent listens on.
+func webViewSocketTarget(pkg string) string {
+	return "localabstract:mobilecli." + pkg
+}
+
 // forwardWebViewSocket creates an adb forward from a random local TCP port to
 // the agent's local abstract socket and returns the assigned port.
 func (d *AndroidDevice) forwardWebViewSocket(pkg string) (int, error) {
-	out, err := d.runAdbCommand("forward", "tcp:0", "localabstract:mobilecli."+pkg)
-	if err != nil {
-		return 0, fmt.Errorf("adb forward: %s: %w", strings.TrimSpace(string(out)), err)
-	}
-	port, err := strconv.Atoi(strings.TrimSpace(string(out)))
-	if err != nil {
-		return 0, fmt.Errorf("unexpected adb forward output %q: %w", strings.TrimSpace(string(out)), err)
-	}
-	return port, nil
+	return d.addForward(webViewSocketTarget(pkg))
 }
 
 // getProcessPID returns the PID of the running process for the given package.
@@ -157,35 +210,12 @@ func (d *AndroidDevice) isAppDebuggable(pkg string) bool {
 	return err == nil
 }
 
-// findExistingForward checks adb's active forward table for an entry pointing
-// to the agent's abstract socket and returns the host TCP port, or 0 if none.
-func (d *AndroidDevice) findExistingForward(pkg string) int {
-	out, err := d.runAdbCommand("forward", "--list")
-	if err != nil {
-		return 0
-	}
-	target := "localabstract:mobilecli." + pkg
-	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
-		if !strings.Contains(line, target) {
-			continue
-		}
-		for _, field := range strings.Fields(line) {
-			if strings.HasPrefix(field, "tcp:") {
-				if port, err := strconv.Atoi(strings.TrimPrefix(field, "tcp:")); err == nil && port > 0 {
-					return port
-				}
-			}
-		}
-	}
-	return 0
-}
-
 // ensureAgentReady ensures the webview agent is running and reachable.
 // It reuses an existing adb forward when possible, only creating a new one
 // on the first call or after the forward has been removed.
 func (d *AndroidDevice) ensureAgentReady(pkg string) (int, error) {
 	// fast path: reuse an existing forward if the agent is still up
-	if port := d.findExistingForward(pkg); port != 0 {
+	if port := d.findForward(webViewSocketTarget(pkg)); port != 0 {
 		if isAgentReady(port) {
 			return port, nil
 		}
@@ -203,7 +233,7 @@ func (d *AndroidDevice) ensureAgentReady(pkg string) (int, error) {
 
 	// no existing forward: full setup
 	if !d.isAppDebuggable(pkg) {
-		return 0, fmt.Errorf("webview injection requires a debug build: %s is not debuggable", pkg)
+		return 0, fmt.Errorf("%w: %s is not debuggable", errAppNotDebuggable, pkg)
 	}
 
 	agentDir, err := d.installWebViewKit(pkg)
@@ -245,9 +275,9 @@ func (d *AndroidDevice) attachAgentAndWait(pkg string, port int, agentDir string
 	return nil
 }
 
-// getWebViewPort resolves the foreground app and ensures the agent is ready,
-// returning the local TCP port to use for RPC calls.
-func (d *AndroidDevice) getWebViewPort() (int, error) {
+// webViews resolves the foreground app and returns what drives its webviews:
+// the agent injected into a debuggable app, or the DevTools server of a browser.
+func (d *AndroidDevice) webViews() (WebViewable, error) {
 	// Foreground detection can momentarily fail right after a launch or in-app
 	// navigation — mCurrentFocus is briefly null during the window transition —
 	// so retry for a short while instead of failing on the first miss.
@@ -260,19 +290,119 @@ func (d *AndroidDevice) getWebViewPort() (int, error) {
 			break
 		}
 		if time.Now().After(deadline) {
-			return 0, fmt.Errorf("could not determine foreground app: %w", err)
+			return nil, fmt.Errorf("could not determine foreground app: %w", err)
 		}
 		time.Sleep(150 * time.Millisecond)
 	}
-	return d.ensureAgentReady(foreground.PackageName)
+
+	port, err := d.ensureAgentReady(foreground.PackageName)
+	if err == nil {
+		return agentWebViews{port: port}, nil
+	}
+	if errors.Is(err, errAppNotDebuggable) {
+		if browser, found := d.devtoolsBrowserOf(foreground.PackageName); found {
+			return browser, nil
+		}
+	}
+	return nil, err
+}
+
+// devtoolsBrowserOf returns the DevTools server of pkg, if it runs one.
+func (d *AndroidDevice) devtoolsBrowserOf(pkg string) (cdpBrowser, bool) {
+	out, err := d.runAdbCommand("shell", "cat", "/proc/net/unix")
+	if err != nil {
+		utils.Verbose("failed to list unix sockets: %s: %v", strings.TrimSpace(string(out)), err)
+		return cdpBrowser{}, false
+	}
+	return findDevtoolsBrowser(pkg, devtoolsSocketNames(string(out)), d.connectDevtoolsSocket)
+}
+
+// connectDevtoolsSocket forwards a local port to a DevTools socket, reusing an
+// existing forward. release undoes a forward that this call created.
+func (d *AndroidDevice) connectDevtoolsSocket(socket string) (cdpBrowser, func(), error) {
+	target := "localabstract:" + socket
+	if port := d.findForward(target); port != 0 {
+		return cdpBrowser{addr: fmt.Sprintf("127.0.0.1:%d", port)}, func() {}, nil
+	}
+	port, err := d.addForward(target)
+	if err != nil {
+		return cdpBrowser{}, nil, err
+	}
+	return cdpBrowser{addr: fmt.Sprintf("127.0.0.1:%d", port)}, func() { d.removeForward(port) }, nil
 }
 
 func (d *AndroidDevice) ListWebViews() ([]WebViewInfo, error) {
-	port, err := d.getWebViewPort()
+	webviews, err := d.webViews()
 	if err != nil {
 		return nil, err
 	}
-	result, err := agentRequest(port, "device.webview.list", nil)
+	return webviews.ListWebViews()
+}
+
+func (d *AndroidDevice) WebViewGoto(webviewID, url string) error {
+	webviews, err := d.webViews()
+	if err != nil {
+		return err
+	}
+	return webviews.WebViewGoto(webviewID, url)
+}
+
+func (d *AndroidDevice) WebViewReload(webviewID string) error {
+	webviews, err := d.webViews()
+	if err != nil {
+		return err
+	}
+	return webviews.WebViewReload(webviewID)
+}
+
+func (d *AndroidDevice) WebViewGoBack(webviewID string) error {
+	webviews, err := d.webViews()
+	if err != nil {
+		return err
+	}
+	return webviews.WebViewGoBack(webviewID)
+}
+
+func (d *AndroidDevice) WebViewGoForward(webviewID string) error {
+	webviews, err := d.webViews()
+	if err != nil {
+		return err
+	}
+	return webviews.WebViewGoForward(webviewID)
+}
+
+func (d *AndroidDevice) WebViewContent(webviewID string) (string, error) {
+	webviews, err := d.webViews()
+	if err != nil {
+		return "", err
+	}
+	return webviews.WebViewContent(webviewID)
+}
+
+func (d *AndroidDevice) WebViewEvaluate(webviewID, expression string, args []any) (any, error) {
+	webviews, err := d.webViews()
+	if err != nil {
+		return nil, err
+	}
+	return webviews.WebViewEvaluate(webviewID, expression, args)
+}
+
+func (d *AndroidDevice) WebViewWaitForLoadState(webviewID, state string, timeoutMs int) error {
+	webviews, err := d.webViews()
+	if err != nil {
+		return err
+	}
+	return webviews.WebViewWaitForLoadState(webviewID, state, timeoutMs)
+}
+
+// agentWebViews drives the embedded webviews of a debuggable app through the
+// agent injected into it, which listens on a forwarded local port.
+type agentWebViews struct {
+	port int
+}
+
+func (a agentWebViews) ListWebViews() ([]WebViewInfo, error) {
+	result, err := agentRequest(a.port, "device.webview.list", nil)
 	if err != nil {
 		return nil, err
 	}
@@ -283,44 +413,28 @@ func (d *AndroidDevice) ListWebViews() ([]WebViewInfo, error) {
 	return webviews, nil
 }
 
-func (d *AndroidDevice) WebViewGoto(webviewID, url string) error {
-	port, err := d.getWebViewPort()
-	if err != nil {
-		return err
-	}
-	_, err = agentRequest(port, "device.webview.goto", map[string]any{"id": webviewID, "url": url})
+func (a agentWebViews) WebViewGoto(webviewID, url string) error {
+	_, err := agentRequest(a.port, "device.webview.goto", map[string]any{"id": webviewID, "url": url})
 	return err
 }
 
-func (d *AndroidDevice) WebViewReload(webviewID string) error {
-	port, err := d.getWebViewPort()
-	if err != nil {
-		return err
-	}
-	_, err = agentRequest(port, "device.webview.reload", map[string]any{"id": webviewID})
+func (a agentWebViews) WebViewReload(webviewID string) error {
+	_, err := agentRequest(a.port, "device.webview.reload", map[string]any{"id": webviewID})
 	return err
 }
 
-func (d *AndroidDevice) WebViewGoBack(webviewID string) error {
-	port, err := d.getWebViewPort()
-	if err != nil {
-		return err
-	}
-	_, err = agentRequest(port, "device.webview.goBack", map[string]any{"id": webviewID})
+func (a agentWebViews) WebViewGoBack(webviewID string) error {
+	_, err := agentRequest(a.port, "device.webview.goBack", map[string]any{"id": webviewID})
 	return err
 }
 
-func (d *AndroidDevice) WebViewGoForward(webviewID string) error {
-	port, err := d.getWebViewPort()
-	if err != nil {
-		return err
-	}
-	_, err = agentRequest(port, "device.webview.goForward", map[string]any{"id": webviewID})
+func (a agentWebViews) WebViewGoForward(webviewID string) error {
+	_, err := agentRequest(a.port, "device.webview.goForward", map[string]any{"id": webviewID})
 	return err
 }
 
-func (d *AndroidDevice) WebViewContent(webviewID string) (string, error) {
-	result, err := d.WebViewEvaluate(webviewID, "return document.documentElement.outerHTML", nil)
+func (a agentWebViews) WebViewContent(webviewID string) (string, error) {
+	result, err := a.WebViewEvaluate(webviewID, "return document.documentElement.outerHTML", nil)
 	if err != nil {
 		return "", err
 	}
@@ -331,18 +445,10 @@ func (d *AndroidDevice) WebViewContent(webviewID string) (string, error) {
 	return content, nil
 }
 
-func (d *AndroidDevice) WebViewEvaluate(webviewID, expression string, args []any) (any, error) {
-	port, err := d.getWebViewPort()
-	if err != nil {
-		return nil, err
-	}
-	return webViewEvaluate(port, webviewID, expression, args)
+func (a agentWebViews) WebViewEvaluate(webviewID, expression string, args []any) (any, error) {
+	return webViewEvaluate(a.port, webviewID, expression, args)
 }
 
-func (d *AndroidDevice) WebViewWaitForLoadState(webviewID, state string, timeoutMs int) error {
-	port, err := d.getWebViewPort()
-	if err != nil {
-		return err
-	}
-	return webViewWaitForLoadState(port, webviewID, state, timeoutMs)
+func (a agentWebViews) WebViewWaitForLoadState(webviewID, state string, timeoutMs int) error {
+	return webViewWaitForLoadState(a.port, webviewID, state, timeoutMs)
 }

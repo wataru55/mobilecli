@@ -1,13 +1,16 @@
 package devices
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"strconv"
+	"net"
+	"os"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/mobile-next/mobilecli/agents"
@@ -23,6 +26,13 @@ type dumpUiParams struct {
 // deviceServerClass is the persistent on-device server (agents/android/java/DeviceServer.java).
 const deviceServerClass = "com.mobilenext.mobilecli.DeviceServer"
 
+// deviceServerKillCommand stops the server and whatever older mobilecli
+// versions left holding the UiAutomation (the UiDumpServer and the devicekit
+// instrumentation). Killing the server also drops any mock-location test
+// providers it held, so the mock_location appop granted for them goes back too.
+const deviceServerKillCommand = "pkill -f '[D]eviceServer'; pkill -f '[U]iDumpServer'; pkill -f 'com.mobilenext.[d]evicekit'; " +
+	"appops set " + shellPackage + " android:mock_location default; true"
+
 // deviceServerTarget is the localabstract socket DeviceServer binds once
 // launched. Reusing one persistent process avoids paying process-fork and
 // UiAutomation-connect cost on every call.
@@ -30,6 +40,108 @@ const deviceServerTarget = "localabstract:mobilecli-server"
 
 // dumpUiWaitUntilIdleMs is how long a dump waits for the UI to settle.
 const dumpUiWaitUntilIdleMs = 2000
+
+// deviceServerIdleTimeoutEnv overrides how long a DeviceServer nobody talks to
+// stays up before it exits on its own (a Go duration, e.g. "5m").
+const deviceServerIdleTimeoutEnv = "MOBILECLI_DEVICE_SERVER_IDLE_TIMEOUT"
+
+// defaultDeviceServerIdleTimeout matches the daemon's own idle timeout: as long
+// as the daemon is being used, the server stays warm.
+const defaultDeviceServerIdleTimeout = 30 * time.Minute
+
+// deviceServerStopTimeout bounds a whole stopDeviceServer, adb commands
+// included: a device that stopped answering must not hold up the daemon's
+// shutdown, or the other devices waiting their turn behind it.
+const deviceServerStopTimeout = 5 * time.Second
+
+// deviceServersInUse remembers every device whose DeviceServer this process
+// has talked to. While a server runs it holds the device's only UiAutomation
+// and every other UiAutomator client is killed, so the daemon stops these on
+// its way out instead of leaving them behind.
+var deviceServersInUse = struct {
+	sync.Mutex
+	devices map[string]*AndroidDevice
+}{devices: map[string]*AndroidDevice{}}
+
+func deviceServerIdleTimeout() time.Duration {
+	value := os.Getenv(deviceServerIdleTimeoutEnv)
+	if value == "" {
+		return defaultDeviceServerIdleTimeout
+	}
+	timeout, err := time.ParseDuration(value)
+	if err != nil || timeout <= 0 {
+		utils.Verbose("ignoring %s=%q: not a positive duration", deviceServerIdleTimeoutEnv, value)
+		return defaultDeviceServerIdleTimeout
+	}
+	return timeout
+}
+
+func rememberDeviceServerInUse(d *AndroidDevice) {
+	deviceServersInUse.Lock()
+	defer deviceServersInUse.Unlock()
+	deviceServersInUse.devices[d.getAdbIdentifier()] = d
+}
+
+// StopDeviceServersInUse stops the DeviceServer on every device this process
+// has used one on, giving the devices' UiAutomation back to other tools. The
+// daemon runs it when it shuts down.
+func StopDeviceServersInUse() error {
+	deviceServersInUse.Lock()
+	servers := deviceServersInUse.devices
+	deviceServersInUse.devices = map[string]*AndroidDevice{}
+	deviceServersInUse.Unlock()
+
+	var errs []error
+	for _, d := range servers {
+		if err := d.stopDeviceServer(); err != nil {
+			errs = append(errs, fmt.Errorf("%s: %w", d.getAdbIdentifier(), err))
+		}
+	}
+	return errors.Join(errs...)
+}
+
+// stopDeviceServer kills the server on the device and waits for it to be gone,
+// so a caller that stops the daemon can hand the device to another UI tool
+// right away. The forward and the remembered port go with it.
+func (d *AndroidDevice) stopDeviceServer() error {
+	utils.Verbose("stopping device server on %s", d.getAdbIdentifier())
+	ctx, cancel := context.WithTimeout(context.Background(), deviceServerStopTimeout)
+	defer cancel()
+
+	if out, err := d.runAdbCommandContext(ctx, "shell", deviceServerKillCommand); err != nil {
+		return fmt.Errorf("stop device server: %s: %w", strings.TrimSpace(string(out)), err)
+	}
+
+	for {
+		running, err := d.isDeviceServerProcessRunning(ctx)
+		if err != nil {
+			return fmt.Errorf("device server still running %s after being told to stop", deviceServerStopTimeout)
+		}
+		if !running {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+
+	d.serverMu.Lock()
+	defer d.serverMu.Unlock()
+	if d.serverPort != 0 {
+		d.removeForward(d.serverPort)
+		d.serverPort = 0
+	}
+	return nil
+}
+
+// isDeviceServerProcessRunning asks the device shell; the bracket keeps pgrep
+// from matching its own command line. pgrep exits 1 when nothing matches, so
+// only a context that ran out is reported as an error.
+func (d *AndroidDevice) isDeviceServerProcessRunning(ctx context.Context) (bool, error) {
+	_, err := d.runAdbCommandContext(ctx, "shell", "pgrep -f '[c]om.mobilenext.mobilecli.DeviceServer'")
+	if ctx.Err() != nil {
+		return false, ctx.Err()
+	}
+	return err == nil, nil
+}
 
 // ensureDeviceServerReady returns the port of a DeviceServer that is running,
 // forwarded and built from this binary's dex, starting it if needed.
@@ -51,6 +163,7 @@ func (d *AndroidDevice) ensureDeviceServerReady() (int, error) {
 		return 0, err
 	}
 	d.serverPort = port
+	rememberDeviceServerInUse(d)
 	return port, nil
 }
 
@@ -83,14 +196,13 @@ func (d *AndroidDevice) startDeviceServer() (int, error) {
 	// legacy devicekit instrumentation from older mobilecli versions) would block
 	// the new one from connecting, so clear both first. This runs as its own adb
 	// shell so pkill -f can't match the launch command line below (or itself).
-	// Killing the server also drops any mock-location test providers it held,
-	// so the mock_location appop granted for them goes back too.
-	_, _ = d.runAdbCommand("shell", "pkill -f '[D]eviceServer'; pkill -f '[U]iDumpServer'; pkill -f 'com.mobilenext.[d]evicekit'; "+
-		"appops set "+shellPackage+" android:mock_location default; true")
+	_, _ = d.runAdbCommand("shell", deviceServerKillCommand)
 
 	// nohup+& detaches the server from this adb shell session so it survives
-	// after this command returns.
-	launchCmd := fmt.Sprintf("CLASSPATH=%s nohup app_process / %s >/dev/null 2>&1 &", androidDexPath, deviceServerClass)
+	// after this command returns. The server exits by itself once idle, so a
+	// daemon that dies without stopping it does not leave it behind for good.
+	launchCmd := fmt.Sprintf("CLASSPATH=%s nohup app_process / %s --idle-timeout-ms=%d >/dev/null 2>&1 &",
+		androidDexPath, deviceServerClass, deviceServerIdleTimeout().Milliseconds())
 	if out, err := d.runAdbCommand("shell", launchCmd); err != nil {
 		return 0, fmt.Errorf("launch device server: %s: %w", strings.TrimSpace(string(out)), err)
 	}
@@ -115,15 +227,59 @@ func (d *AndroidDevice) startDeviceServer() (int, error) {
 // addForward creates a host TCP forward to target (e.g.
 // "localabstract:devicekit") on a freshly assigned local port and returns it.
 func (d *AndroidDevice) addForward(target string) (int, error) {
-	out, err := d.runAdbCommand("forward", "tcp:0", target)
-	if err != nil {
-		return 0, fmt.Errorf("adb forward: %s: %w", strings.TrimSpace(string(out)), err)
+	return forwardOnFreePort(d.runAdbCommand, target)
+}
+
+// forwardAttempts bounds the retries when adb can't bind the port we picked.
+const forwardAttempts = 3
+
+// adbPortTakenMessage is what adb prints when the local port of a forward is in use.
+const adbPortTakenMessage = "cannot bind"
+
+// forwardOnFreePort forwards a free local port to target and returns the port. The port
+// was free when we probed it, but adb binds it a moment later and, with a remote adb
+// server, on another host, so a taken port is retried on a new one.
+func forwardOnFreePort(runAdb func(args ...string) ([]byte, error), target string) (int, error) {
+	var lastErr error
+	for attempt := 0; attempt < forwardAttempts; attempt++ {
+		args, port, err := forwardArgs(target)
+		if err != nil {
+			return 0, err
+		}
+
+		out, err := runAdb(args...)
+		if err == nil {
+			return port, nil
+		}
+
+		lastErr = fmt.Errorf("adb forward: %s: %w", strings.TrimSpace(string(out)), err)
+		if !strings.Contains(string(out), adbPortTakenMessage) {
+			return 0, lastErr
+		}
 	}
-	port, err := strconv.Atoi(strings.TrimSpace(string(out)))
+	return 0, lastErr
+}
+
+// forwardArgs builds the adb arguments for a forward to target on a free local port that
+// we pick. "tcp:0" would let adb pick, but that only works when the adb server runs on this
+// machine. With a remote adb server the port adb reports is opened on the other host, and
+// tooling that tunnels forwarded ports by their number has no number to tunnel, so every
+// agent behind such a forward looks dead.
+func forwardArgs(target string) ([]string, int, error) {
+	listener, err := (&net.ListenConfig{}).Listen(context.Background(), "tcp", "127.0.0.1:0")
 	if err != nil {
-		return 0, fmt.Errorf("unexpected adb forward output %q: %w", strings.TrimSpace(string(out)), err)
+		return nil, 0, fmt.Errorf("find a free local port: %w", err)
 	}
-	return port, nil
+	addr, isTCP := listener.Addr().(*net.TCPAddr)
+	closeErr := listener.Close()
+	if !isTCP {
+		return nil, 0, fmt.Errorf("find a free local port: unexpected address %v", listener.Addr())
+	}
+	port := addr.Port
+	if closeErr != nil {
+		return nil, 0, fmt.Errorf("release local port %d: %w", port, closeErr)
+	}
+	return []string{"forward", fmt.Sprintf("tcp:%d", port), target}, port, nil
 }
 
 // removeForward tears down a host TCP forward created by this device, best

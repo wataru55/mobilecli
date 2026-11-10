@@ -2,6 +2,37 @@
 #import <UIKit/UIKit.h>
 #import <WebKit/WebKit.h>
 
+// WebKit hands back values NSJSONSerialization refuses to write, and it refuses by
+// throwing, which takes down the app this agent is injected into: a non-finite
+// NSNumber for 1/0 or NaN, and an NSDate for a JS Date. Answer with what
+// JSON.stringify makes of each, which is also what the android agent reports:
+// null for a non-finite number, an ISO 8601 string for a date.
+static id jsonSafe(id value) {
+    if ([value isKindOfClass:[NSNumber class]]) {
+        return isfinite([value doubleValue]) ? value : [NSNull null];
+    }
+    if ([value isKindOfClass:[NSDate class]]) {
+        if (!isfinite([value timeIntervalSince1970])) return [NSNull null];
+        NSISO8601DateFormatter *formatter = [[NSISO8601DateFormatter alloc] init];
+        formatter.formatOptions = NSISO8601DateFormatWithInternetDateTime | NSISO8601DateFormatWithFractionalSeconds;
+        return [formatter stringFromDate:value];
+    }
+    if ([value isKindOfClass:[NSArray class]]) {
+        NSMutableArray *safe = [NSMutableArray arrayWithCapacity:[value count]];
+        for (id item in value) [safe addObject:jsonSafe(item)];
+        return safe;
+    }
+    if ([value isKindOfClass:[NSDictionary class]]) {
+        NSMutableDictionary *safe = [NSMutableDictionary dictionaryWithCapacity:[value count]];
+        for (id key in value) safe[[key description]] = jsonSafe(value[key]);
+        return safe;
+    }
+    if ([value isKindOfClass:[NSString class]] || value == [NSNull null]) {
+        return value;
+    }
+    return [value description];
+}
+
 @implementation IosBridge
 
 + (void)runOnMainThread:(dispatch_block_t)block {
@@ -27,6 +58,53 @@
         }
     }
     return windows;
+}
+
++ (void)dismissKeyboard {
+    [self runOnMainThread:^{
+        for (UIWindow *window in [self allWindows]) {
+            if (window.isKeyWindow) {
+                [window endEditing:YES];
+            }
+        }
+    }];
+}
+
++ (nullable UIViewController *)findController:(Class)controllerClass from:(nullable UIViewController *)root {
+    NSMutableArray<UIViewController *> *pending = [NSMutableArray array];
+    if (root) [pending addObject:root];
+    while (pending.count > 0) {
+        UIViewController *controller = pending.firstObject;
+        [pending removeObjectAtIndex:0];
+        if ([controller isKindOfClass:controllerClass]) return controller;
+        [pending addObjectsFromArray:controller.childViewControllers];
+        if (controller.presentedViewController) [pending addObject:controller.presentedViewController];
+    }
+    return nil;
+}
+
+// Reads the Dart VM service URI from the running engine. `publisher` is a private
+// ivar of FlutterEngine, the one version-sensitive point. Nil means this is not a
+// Flutter app, which callers treat as a signal to use the accessibility dump.
++ (nullable NSString *)flutterVMServiceURI {
+    Class controllerClass = NSClassFromString(@"FlutterViewController");
+    if (!controllerClass) return nil;
+
+    __block NSString *uri = nil;
+    [self runOnMainThread:^{
+        @try {
+            for (UIWindow *window in [self allWindows]) {
+                UIViewController *controller = [self findController:controllerClass from:window.rootViewController];
+                if (!controller) continue;
+                NSURL *url = [[[controller valueForKey:@"engine"] valueForKey:@"publisher"] valueForKey:@"url"];
+                uri = url.absoluteString;
+                return;
+            }
+        } @catch (NSException *exception) {
+            uri = nil;
+        }
+    }];
+    return uri;
 }
 
 + (void)collectWebViews:(UIView *)view into:(NSMutableArray<NSDictionary *> *)result depth:(int)depth {
@@ -114,10 +192,12 @@
     dispatch_semaphore_t sem = dispatch_semaphore_create(0);
 
     dispatch_async(dispatch_get_main_queue(), ^{
+        // looked up by name: a link-time import would stop the agent from being
+        // mapped into an app that has not loaded WebKit
         [(WKWebView *)webView callAsyncJavaScript:body
                                         arguments:@{}
                                           inFrame:nil
-                                   inContentWorld:WKContentWorld.pageWorld
+                                   inContentWorld:[NSClassFromString(@"WKContentWorld") pageWorld]
                                 completionHandler:^(id result, NSError *error) {
             if (timedOut) return;
             jsResult = result;
@@ -140,7 +220,7 @@
     if ([jsResult isKindOfClass:[NSDictionary class]] && jsResult[@"__mce"]) {
         return @{@"__error": jsResult[@"__mce"] ?: @"unknown JS error"};
     }
-    return @{@"result": jsResult ?: [NSNull null]};
+    return @{@"result": jsResult ? jsonSafe(jsResult) : [NSNull null]};
 }
 
 + (void)gotoURL:(NSString *)urlStr inWebView:(UIView *)webView {

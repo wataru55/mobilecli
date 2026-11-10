@@ -22,6 +22,20 @@ import (
 // insecureStorage is bound to the global --insecure-storage flag.
 var insecureStorage bool
 
+// useFileStorage reports whether the token lives in the credentials file rather
+// than the OS keyring. That is the case when --insecure-storage is set, and
+// always on Termux, which has no keyring and where probing for one kills the
+// process: the seccomp filter rejects the faccessat2 syscall that
+// exec.LookPath makes, so the keyring backend crashes with SIGSYS. We detect
+// Termux by TERMUX_VERSION, since the binary is built with GOOS=linux.
+func useFileStorage() bool {
+	return insecureStorage || isTermux()
+}
+
+func isTermux() bool {
+	return os.Getenv("TERMUX_VERSION") != ""
+}
+
 // credentialsFilePath returns the path to the plaintext token file used when
 // --insecure-storage is set: $XDG_CONFIG_HOME/mobilecli/credentials, falling
 // back to ~/.config/mobilecli/credentials. We deliberately use ~/.config on
@@ -42,7 +56,13 @@ func credentialsFilePath() (string, error) {
 // storeToken saves the token in the keyring, or in the credentials file when
 // --insecure-storage is set.
 func storeToken(token string) error {
-	if insecureStorage {
+	if useFileStorage() {
+		// on Termux we fall back to the plaintext file without being asked to, so
+		// tell the user. skip it when --insecure-storage was passed explicitly,
+		// since they already opted into plaintext storage.
+		if isTermux() && !insecureStorage {
+			fmt.Fprintln(os.Stderr, "Notice: Termux has no OS keyring, storing token in plaintext credentials file")
+		}
 		return storeTokenInFile(token)
 	}
 	if err := keyring.Set(keyringService, keyringUser, token); err != nil {
@@ -74,7 +94,7 @@ func loadToken() (string, error) {
 		return token, nil
 	}
 
-	if insecureStorage {
+	if useFileStorage() {
 		return loadTokenFromFile()
 	}
 
@@ -155,7 +175,7 @@ func loadTokenFromFile() (string, error) {
 // deleteToken removes the stored token. It returns keyring.ErrNotFound when no
 // token was stored, so logout can report "not logged in".
 func deleteToken() error {
-	if insecureStorage {
+	if useFileStorage() {
 		path, err := credentialsFilePath()
 		if err != nil {
 			return err

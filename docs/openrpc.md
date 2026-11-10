@@ -20,6 +20,7 @@ JSON-RPC API for mobile device automation and control
 - [device.crashes.get](#devicecrashesget)
 - [device.crashes.list](#devicecrasheslist)
 - [device.dump.ui](#devicedumpui)
+- [device.fold.set](#devicefoldset)
 - [device.fs.ls](#devicefsls)
 - [device.fs.mkdir](#devicefsmkdir)
 - [device.fs.pull](#devicefspull)
@@ -27,6 +28,7 @@ JSON-RPC API for mobile device automation and control
 - [device.fs.rm](#devicefsrm)
 - [device.info](#deviceinfo)
 - [device.io.button](#deviceiobutton)
+- [device.io.fill](#deviceiofill)
 - [device.io.gesture](#deviceiogesture)
 - [device.io.keys](#deviceiokeys)
 - [device.io.longpress](#deviceiolongpress)
@@ -42,6 +44,7 @@ JSON-RPC API for mobile device automation and control
 - [device.reboot](#devicereboot)
 - [device.screencapture](#devicescreencapture)
 - [device.screenshot](#devicescreenshot)
+- [device.settings.apply](#devicesettingsapply)
 - [device.shutdown](#deviceshutdown)
 - [device.url](#deviceurl)
 - [device.webview.content](#devicewebviewcontent)
@@ -67,7 +70,7 @@ JSON-RPC API for mobile device automation and control
 
 **Clear application data**
 
-Clears all data (cache, preferences, databases) for an application without uninstalling it. Supported on Android and iOS Simulator. Not supported on real iOS devices.
+Clears all data (cache, preferences, databases) for an application without uninstalling it, and resets its runtime permissions so the app asks for them again (on iOS Simulator, notification permission is only reset by reinstalling). Supported on Android and iOS Simulator. Not supported on real iOS devices.
 
 #### Parameters
 
@@ -543,6 +546,40 @@ UI hierarchy data
 ```
 
 
+### device.fold.set
+
+**Fold or unfold a foldable device**
+
+Sets the hinge of a foldable device. Supported on foldable iOS simulators and Android emulators
+
+#### Parameters
+
+| Name | Type | Required | Description |
+|------|------|----------|-------------|
+| `deviceId` | `string` | ✓ | ID of the target device |
+| `state` | `string` | ✓ | 'folded' (0), 'half-open' (90), 'open' (180), or an angle in degrees between 0 and 180 |
+
+#### Response
+
+**Type:** [`SuccessResult`](#successresult)
+
+Operation result
+
+#### Example Request
+
+```json
+{
+  "jsonrpc": "2.0",
+  "method": "device.fold.set",
+  "params": {
+    "deviceId": "string",
+    "state": "string"
+  },
+  "id": 1
+}
+```
+
+
 ### device.fs.ls
 
 **List files on device**
@@ -785,6 +822,40 @@ Operation result
   "params": {
     "deviceId": "string",
     "button": "string"
+  },
+  "id": 1
+}
+```
+
+
+### device.io.fill
+
+**Fill text field**
+
+Replaces the text of the focused text field; an empty string clears it. Unlike device.io.text, which types key by key, this sets the text in one step: on Android through accessibility, on iOS by clearing the field and typing
+
+#### Parameters
+
+| Name | Type | Required | Description |
+|------|------|----------|-------------|
+| `deviceId` | `string` | ✓ | ID of the target device |
+| `text` | `string` | ✓ | Text to put in the field, or an empty string to clear it |
+
+#### Response
+
+**Type:** [`SuccessResult`](#successresult)
+
+Operation result
+
+#### Example Request
+
+```json
+{
+  "jsonrpc": "2.0",
+  "method": "device.io.fill",
+  "params": {
+    "deviceId": "string",
+    "text": "string"
   },
   "id": 1
 }
@@ -1344,6 +1415,42 @@ Screenshot data
 ```
 
 
+### device.settings.apply
+
+**Apply device settings**
+
+Applies device-level settings. Only the settings provided are changed
+
+#### Parameters
+
+| Name | Type | Required | Description |
+|------|------|----------|-------------|
+| `deviceId` | `string` | ✓ | ID of the target device |
+| `animations` | enum: `on, off` |  | Toggle system animations (Android only) |
+| `appearance` | enum: `light, dark` |  | System appearance |
+
+#### Response
+
+**Type:** [`SuccessResult`](#successresult)
+
+Operation result
+
+#### Example Request
+
+```json
+{
+  "jsonrpc": "2.0",
+  "method": "device.settings.apply",
+  "params": {
+    "deviceId": "string",
+    "animations": "on",
+    "appearance": "light"
+  },
+  "id": 1
+}
+```
+
+
 ### device.shutdown
 
 **Shutdown a device**
@@ -1592,7 +1699,7 @@ Operation result
 
 **List webviews**
 
-Returns all embedded webviews currently visible in the foreground app on the device. Browser apps (Safari, Chrome) are not included.
+Returns all embedded webviews currently visible in the foreground app on the device. When the foreground app is Chrome on Android or Safari on iOS, returns its tabs instead.
 
 #### Parameters
 

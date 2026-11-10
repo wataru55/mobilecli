@@ -171,38 +171,52 @@ func probeDartVMService(port string) vmServiceProbe {
 // only when the advertised port is the one we already located, so a second
 // simulator advertising the same bundle cannot supply a mismatched token.
 func authCodeForPort(bundleID, port string, timeout time.Duration) string {
+	_, auth := lookupDartVMServiceMDNS(bundleID, timeout, func(advertisedPort string) bool {
+		return advertisedPort == port
+	})
+	return auth
+}
+
+// lookupDartVMServiceMDNS resolves the bundle's Dart VM service instance over
+// Bonjour and returns the first answer whose port accept takes, or "" for both
+// when none did in time. The instance name is just the bundle id, so every
+// device running the app answers to it; accept is where a caller that knows
+// which port it wants rules the others out.
+func lookupDartVMServiceMDNS(bundleID string, timeout time.Duration, accept func(port string) bool) (port, auth string) {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
+	// -L resolves a specific instance (the bundle id) to host:port + TXT record.
+	// dns-sd streams until killed, so we read until we have both fields. Use the
+	// absolute system path rather than relying on PATH.
 	cmd := exec.CommandContext(ctx, "/usr/bin/dns-sd", "-L", bundleID, "_dartVmService._tcp", "local.")
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
-		return ""
+		return "", ""
 	}
 	if err := cmd.Start(); err != nil {
-		return ""
+		return "", ""
 	}
 	defer func() {
 		_ = cmd.Process.Kill()
 		_ = cmd.Wait()
 	}()
 
-	var advertisedPort, auth string
 	scanner := bufio.NewScanner(stdout)
 	for scanner.Scan() {
 		line := scanner.Text()
 		if m := mdnsPortLine.FindStringSubmatch(line); m != nil {
-			advertisedPort = m[1]
+			port = m[1]
 		}
 		if m := mdnsAuthCode.FindStringSubmatch(line); m != nil {
 			auth = m[1]
 		}
-		if advertisedPort != "" && auth != "" {
-			if advertisedPort == port {
-				return auth
+		if port != "" && auth != "" {
+			if accept(port) {
+				return port, auth
 			}
-			advertisedPort, auth = "", ""
+			port, auth = "", ""
 		}
 	}
-	return ""
+	return "", ""
 }

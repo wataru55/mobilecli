@@ -1,11 +1,14 @@
 package com.mobilenext.mobilecli;
 
+import android.graphics.Rect;
 import android.hardware.display.DisplayManager;
 import android.hardware.display.VirtualDisplay;
 import android.os.IBinder;
 import android.util.Log;
 import android.view.Display;
 import android.view.Surface;
+
+import java.lang.reflect.Method;
 
 /** Display info and virtual display creation via hidden APIs (no Context needed). */
 class DisplayUtils {
@@ -48,17 +51,115 @@ class DisplayUtils {
 		}
 	}
 
+	/** A running mirror of the default display; release() stops it. */
+	interface DisplayMirror {
+		void release();
+
+		/** Has the display drawn into the surface once more, even if nothing on screen changed. */
+		void refresh();
+	}
+
 	/** Mirrors the default display into surface without MediaProjection; null on failure. */
-	static VirtualDisplay createVirtualDisplay(String name, int width, int height, Surface surface) {
+	static DisplayMirror createVirtualDisplay(String name, int width, int height, Surface surface) {
 		try {
 			// hidden static DisplayManager.createVirtualDisplay(String name, int width,
 			// int height, int displayIdToMirror, Surface surface)
-			return (VirtualDisplay) DisplayManager.class
-					.getMethod("createVirtualDisplay", String.class, int.class, int.class, int.class, Surface.class)
-					.invoke(null, name, width, height, Display.DEFAULT_DISPLAY, surface);
+			Method create = DisplayManager.class
+					.getMethod("createVirtualDisplay", String.class, int.class, int.class, int.class, Surface.class);
+			return new DisplayMirror() {
+				private VirtualDisplay display = newDisplay();
+
+				private VirtualDisplay newDisplay() throws Exception {
+					return (VirtualDisplay) create.invoke(null, name, width, height, Display.DEFAULT_DISPLAY, surface);
+				}
+
+				@Override
+				public synchronized void release() {
+					display.release();
+				}
+
+				@Override
+				public synchronized void refresh() {
+					// a new display is drawn once when it appears; giving the old one its
+					// surface again draws nothing (seen on a Pixel 7, Android 14)
+					try {
+						display.release();
+						display = newDisplay();
+					} catch (Exception e) {
+						Log.w(TAG, "Failed to refresh the virtual display", e);
+					}
+				}
+			};
+		} catch (NoSuchMethodException e) {
+			// Android 12 and 13 don't have that method (seen on Pixel 6, Galaxy A53, Pixel 7a).
+			// They still have SurfaceControl.createDisplay, which Android 14 removed.
+			Log.i(TAG, "DisplayManager can't mirror on this Android version, using SurfaceControl");
 		} catch (Exception e) {
 			Log.e(TAG, "Failed to create virtual display", e);
 			return null;
 		}
+
+		try {
+			return mirrorWithSurfaceControl(name, width, height, surface);
+		} catch (Exception e) {
+			Log.e(TAG, "Failed to mirror the display with SurfaceControl", e);
+			return null;
+		}
+	}
+
+	private static DisplayMirror mirrorWithSurfaceControl(String name, int width, int height, Surface surface) throws Exception {
+		return new DisplayMirror() {
+			private IBinder display = createMirrorDisplay(name, width, height, surface);
+
+			@Override
+			public synchronized void release() {
+				destroyDisplay(display);
+			}
+
+			@Override
+			public synchronized void refresh() {
+				// a new display is composed once when it appears; re-applying the same
+				// surface to the old one changes nothing and draws nothing
+				try {
+					IBinder fresh = createMirrorDisplay(name, width, height, surface);
+					destroyDisplay(display);
+					display = fresh;
+				} catch (Exception e) {
+					Log.w(TAG, "Failed to refresh the mirror display", e);
+				}
+			}
+		};
+	}
+
+	private static void destroyDisplay(IBinder display) {
+		try {
+			Class.forName("android.view.SurfaceControl").getMethod("destroyDisplay", IBinder.class).invoke(null, display);
+		} catch (Exception e) {
+			Log.w(TAG, "Failed to destroy the mirror display", e);
+		}
+	}
+
+	private static IBinder createMirrorDisplay(String name, int width, int height, Surface surface) throws Exception {
+		Object dm = displayManager();
+		Object info = dm.getClass().getMethod("getDisplayInfo", int.class).invoke(dm, Display.DEFAULT_DISPLAY);
+		Class<?> infoClass = info.getClass();
+		Rect source = new Rect(0, 0, infoClass.getField("logicalWidth").getInt(info), infoClass.getField("logicalHeight").getInt(info));
+		int layerStack = infoClass.getField("layerStack").getInt(info);
+
+		Class<?> sc = Class.forName("android.view.SurfaceControl");
+		boolean secure = false;
+		IBinder display = (IBinder) sc.getMethod("createDisplay", String.class, boolean.class).invoke(null, name, secure);
+
+		sc.getMethod("openTransaction").invoke(null);
+		try {
+			sc.getMethod("setDisplaySurface", IBinder.class, Surface.class).invoke(null, display, surface);
+			sc.getMethod("setDisplayProjection", IBinder.class, int.class, Rect.class, Rect.class)
+					.invoke(null, display, Surface.ROTATION_0, source, new Rect(0, 0, width, height));
+			sc.getMethod("setDisplayLayerStack", IBinder.class, int.class).invoke(null, display, layerStack);
+		} finally {
+			sc.getMethod("closeTransaction").invoke(null);
+		}
+
+		return display;
 	}
 }

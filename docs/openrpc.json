@@ -298,6 +298,36 @@
       }
     },
     {
+      "name": "device.io.fill",
+      "summary": "Fill text field",
+      "description": "Replaces the text of the focused text field; an empty string clears it. Unlike device.io.text, which types key by key, this sets the text in one step: on Android through accessibility, on iOS by clearing the field and typing",
+      "params": [
+        {
+          "name": "deviceId",
+          "description": "ID of the target device",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "name": "text",
+          "description": "Text to put in the field, or an empty string to clear it",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "result": {
+        "name": "success",
+        "description": "Operation result",
+        "schema": {
+          "$ref": "#/components/schemas/SuccessResult"
+        }
+      }
+    },
+    {
       "name": "device.clipboard.get",
       "summary": "Read clipboard",
       "description": "Reads the text currently on the device clipboard",
@@ -682,6 +712,36 @@
       }
     },
     {
+      "name": "device.fold.set",
+      "summary": "Fold or unfold a foldable device",
+      "description": "Sets the hinge of a foldable device. Supported on foldable iOS simulators and Android emulators",
+      "params": [
+        {
+          "name": "deviceId",
+          "description": "ID of the target device",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "name": "state",
+          "description": "'folded' (0), 'half-open' (90), 'open' (180), or an angle in degrees between 0 and 180",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "result": {
+        "name": "success",
+        "description": "Operation result",
+        "schema": {
+          "$ref": "#/components/schemas/SuccessResult"
+        }
+      }
+    },
+    {
       "name": "device.location.set",
       "summary": "Override device location",
       "description": "Overrides the GPS location reported by the device. On iOS 17+ physical devices the override only lasts as long as the mobilecli process that set it",
@@ -812,6 +872,46 @@
         "description": "Reboot operation result",
         "schema": {
           "type": "object"
+        }
+      }
+    },
+    {
+      "name": "device.settings.apply",
+      "summary": "Apply device settings",
+      "description": "Applies device-level settings. Only the settings provided are changed",
+      "params": [
+        {
+          "name": "deviceId",
+          "description": "ID of the target device",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "name": "animations",
+          "description": "Toggle system animations (Android only)",
+          "required": false,
+          "schema": {
+            "type": "string",
+            "enum": ["on", "off"]
+          }
+        },
+        {
+          "name": "appearance",
+          "description": "System appearance",
+          "required": false,
+          "schema": {
+            "type": "string",
+            "enum": ["light", "dark"]
+          }
+        }
+      ],
+      "result": {
+        "name": "success",
+        "description": "Operation result",
+        "schema": {
+          "$ref": "#/components/schemas/SuccessResult"
         }
       }
     },
@@ -1084,7 +1184,7 @@
     {
       "name": "device.apps.clear",
       "summary": "Clear application data",
-      "description": "Clears all data (cache, preferences, databases) for an application without uninstalling it. Supported on Android and iOS Simulator. Not supported on real iOS devices.",
+      "description": "Clears all data (cache, preferences, databases) for an application without uninstalling it, and resets its runtime permissions so the app asks for them again (on iOS Simulator, notification permission is only reset by reinstalling). Supported on Android and iOS Simulator. Not supported on real iOS devices.",
       "params": [
         {
           "name": "deviceId",
@@ -1444,7 +1544,7 @@
     {
       "name": "device.webview.list",
       "summary": "List webviews",
-      "description": "Returns all embedded webviews currently visible in the foreground app on the device. Browser apps (Safari, Chrome) are not included.",
+      "description": "Returns all embedded webviews currently visible in the foreground app on the device. When the foreground app is Chrome on Android or Safari on iOS, returns its tabs instead.",
       "params": [
         {
           "name": "deviceId",

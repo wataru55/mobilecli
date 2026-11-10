@@ -20,16 +20,16 @@ type AgentInstallRequest struct {
 }
 
 const (
-	agentVersionIOS   = "0.0.26"
+	agentVersionIOS   = "0.0.37"
 	iosRunnerBundleID = "com.mobilenext.devicekit-iosUITests.xctrunner"
 	noAgentForAndroid = "no agent needed for android devices"
 )
 
 // pinned SHA-256 checksums for agent artifacts, keyed by download filename
 var agentChecksums = map[string]string{
-	"devicekit-ios-Sim-arm64.zip":  "c20c890e811e4f019a60807bdaefb724dba417cf1ac97197119cac738e32f24f",
-	"devicekit-ios-Sim-x86_64.zip": "fc803e3518c6478091773161103fe8170abfe2a900764d10591fb7bb90c8fddc",
-	"devicekit-ios-runner.ipa":     "a5d4a2a9a353fb9c0d25c6e52a64cc6729cdc9f3a8f80c874b25d4599731ecb9",
+	"devicekit-ios-Sim-arm64.zip":  "5816c58f0e154f60f9b56049c79480bbd64b5b4a78a43480585883b2b8c0166d",
+	"devicekit-ios-Sim-x86_64.zip": "ec0b26f5fc2619413acd2bfb57c73181b0e8194d57a900402d516cbdae989864",
+	"devicekit-ios-runner.ipa":     "42d9a84da7a61cf7d0dfb35bc182e5960317658826574d64e89d30aa5f035d4b",
 }
 
 // AgentMessageResponse is the data of agent status/uninstall responses.
@@ -75,7 +75,7 @@ func AgentStatusCommand(req DeviceIDRequest) *CommandResponse {
 	if err != nil {
 		return NewErrorResponse(err)
 	}
-	if device.Platform() == "android" {
+	if device.Platform() == devices.PlatformAndroid {
 		return noAgentNeededResponse()
 	}
 	agent := findInstalledAgent(device)
@@ -91,7 +91,7 @@ func AgentInstallCommand(req AgentInstallRequest) *CommandResponse {
 	if err != nil {
 		return NewErrorResponse(err)
 	}
-	if device.Platform() == "android" {
+	if device.Platform() == devices.PlatformAndroid {
 		return noAgentNeededResponse()
 	}
 
@@ -105,6 +105,10 @@ func AgentInstallCommand(req AgentInstallRequest) *CommandResponse {
 			if agent.Version == expectedVersion {
 				utils.Verbose("agent already installed with version %s", agent.Version)
 				return agentStatusResponse("Agent is already installed", agent)
+			}
+
+			if err := requireProvisioningProfile(device, req.ProvisioningProfile); err != nil {
+				return NewErrorResponse(err)
 			}
 
 			utils.Verbose("installed agent version %s differs from expected %s, uninstalling before reinstall", agent.Version, expectedVersion)
@@ -127,13 +131,13 @@ func AgentInstallCommand(req AgentInstallRequest) *CommandResponse {
 
 func installAgent(device devices.ControllableDevice, provisioningProfile string) error {
 	switch device.Platform() {
-	case "ios":
+	case devices.PlatformIOS:
 		switch device.DeviceType() {
-		case "simulator":
+		case devices.DeviceTypeSimulator:
 			return installAgentOnSimulator(device)
-		case "real":
-			if provisioningProfile == "" {
-				return fmt.Errorf("--provisioning-profile is required for real iOS devices")
+		case devices.DeviceTypeReal:
+			if err := requireProvisioningProfile(device, provisioningProfile); err != nil {
+				return err
 			}
 			return installAgentOnRealIOS(device, provisioningProfile)
 		default:
@@ -144,13 +148,22 @@ func installAgent(device devices.ControllableDevice, provisioningProfile string)
 	}
 }
 
+// requireProvisioningProfile runs before an old agent is removed, so a missing
+// profile cannot leave a real device with no agent.
+func requireProvisioningProfile(device devices.ControllableDevice, provisioningProfile string) error {
+	if device.DeviceType() == devices.DeviceTypeReal && provisioningProfile == "" {
+		return fmt.Errorf("--provisioning-profile is required for real iOS devices")
+	}
+	return nil
+}
+
 // AgentUninstallCommand removes the on-device agent.
 func AgentUninstallCommand(req DeviceIDRequest) *CommandResponse {
 	device, err := FindDeviceOrAutoSelect(req.DeviceID)
 	if err != nil {
 		return NewErrorResponse(err)
 	}
-	if device.Platform() == "android" {
+	if device.Platform() == devices.PlatformAndroid {
 		return noAgentNeededResponse()
 	}
 
@@ -167,14 +180,14 @@ func AgentUninstallCommand(req DeviceIDRequest) *CommandResponse {
 }
 
 func agentPackageForPlatform(platform string) string {
-	if platform == "ios" {
+	if platform == devices.PlatformIOS {
 		return iosRunnerBundleID
 	}
 	return ""
 }
 
 func agentVersionForPlatform(platform string) string {
-	if platform == "ios" {
+	if platform == devices.PlatformIOS {
 		return agentVersionIOS
 	}
 	return ""
@@ -279,7 +292,7 @@ func findInstalledAgent(device devices.ControllableDevice) *devices.InstalledApp
 // On iOS the runner bundle id can carry a signing/team prefix when re-signed, so a
 // suffix match is used; other platforms require an exact match.
 func agentMatchesApp(platform, installedPackage, agentPackage string) bool {
-	if platform == "ios" {
+	if platform == devices.PlatformIOS {
 		return strings.HasSuffix(installedPackage, agentPackage)
 	}
 	return installedPackage == agentPackage

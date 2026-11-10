@@ -1,7 +1,10 @@
 package devicekit
 
 import (
+	"net/http"
+	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/mobile-next/mobilecli/types"
 )
@@ -406,5 +409,173 @@ func TestFilterSourceElementsOmitsChildrenFromJsonWhenEmpty(t *testing.T) {
 
 	if output[0].Children != nil {
 		t.Errorf("expected leaf element to have nil Children, got %+v", output[0].Children)
+	}
+}
+
+func TestFilterSourceElementsIncludesTypesBehindSemanticRoles(t *testing.T) {
+	// Clients map these types to semantic roles (slider, progressbar, alert,
+	// combobox, list, listitem, tab, link, header). A labeled element of any
+	// of them must survive filtering, or the role can never match on iOS.
+	roleTypes := []string{
+		"Slider", "ProgressIndicator", "ActivityIndicator", "Picker", "PickerWheel",
+		"Link", "Tab", "TabBar", "NavigationBar", "Toolbar", "Alert", "Sheet",
+		"Cell", "Table", "CollectionView", "ScrollView",
+	}
+
+	for _, roleType := range roleTypes {
+		output := filterSourceElements(sourceTreeElement{
+			Type:  "XCUIElementType" + roleType,
+			Label: strPtr("labeled"),
+			Rect:  visibleRect(0, 100, 300, 44),
+		})
+
+		if len(output) != 1 || output[0].Type != roleType {
+			t.Errorf("expected a labeled %s to be included, got %+v", roleType, output)
+		}
+	}
+}
+
+func TestFilterSourceElementsIncludesUnlabeledAdjustableControls(t *testing.T) {
+	// Sliders and pickers are interactive yet often carry no label, so they
+	// are always included, like TextField and Switch.
+	for _, controlType := range []string{"Slider", "Picker", "PickerWheel"} {
+		output := filterSourceElements(sourceTreeElement{
+			Type: "XCUIElementType" + controlType,
+			Rect: visibleRect(0, 100, 300, 44),
+		})
+
+		if len(output) != 1 || output[0].Type != controlType {
+			t.Errorf("expected an unlabeled %s to be included, got %+v", controlType, output)
+		}
+	}
+}
+
+func TestFilterSourceElementsStillDropsUnlabeledContainers(t *testing.T) {
+	// Unlabeled containers stay out of the dump to keep it small; their
+	// children are hoisted as before.
+	output := filterSourceElements(sourceTreeElement{
+		Type: "XCUIElementTypeTable",
+		Rect: visibleRect(0, 0, 402, 874),
+		Children: []sourceTreeElement{
+			{
+				Type:  "XCUIElementTypeButton",
+				Label: strPtr("Join"),
+				Rect:  visibleRect(338, 194, 31, 20),
+			},
+		},
+	})
+
+	if len(output) != 1 || output[0].Type != "Button" {
+		t.Fatalf("expected only the hoisted Button, got %+v", output)
+	}
+}
+
+func TestFilterSourceElementsTreatsEmptyIdentifiersAsAbsent(t *testing.T) {
+	// A container whose label/name/placeholder are present but empty is as
+	// anonymous as one without them: drop it and hoist its children.
+	output := filterSourceElements(sourceTreeElement{
+		Type:             "XCUIElementTypeTable",
+		Label:            strPtr(""),
+		Name:             strPtr(""),
+		PlaceholderValue: strPtr(""),
+		Rect:             visibleRect(0, 0, 402, 874),
+		Children: []sourceTreeElement{
+			{
+				Type:  "XCUIElementTypeButton",
+				Label: strPtr("Join"),
+				Rect:  visibleRect(338, 194, 31, 20),
+			},
+		},
+	})
+
+	if len(output) != 1 || output[0].Type != "Button" {
+		t.Fatalf("expected only the hoisted Button, got %+v", output)
+	}
+}
+
+func toggleSwitch(value string) sourceTreeElement {
+	return sourceTreeElement{
+		Type:          "XCUIElementTypeSwitch",
+		Label:         strPtr("Toggle switch"),
+		RawIdentifier: strPtr("toggle"),
+		Value:         strPtr(value),
+		Rect:          visibleRect(16, 428, 370, 52),
+	}
+}
+
+func isChecked(e types.ScreenElement) bool {
+	return e.Checked != nil && *e.Checked
+}
+
+// iOS reports a switch's state only as value "1" / "0"; it must also surface
+// as checked, the way Android reports it, so toBeChecked() works on both.
+func TestFilterSourceElementsMarksSwitchThatIsOnAsChecked(t *testing.T) {
+	output := filterSourceElements(toggleSwitch("1"))
+
+	if len(output) != 1 {
+		t.Fatalf("expected 1 element, got %d: %+v", len(output), output)
+	}
+	if !isChecked(output[0]) {
+		t.Errorf("expected checked, got %+v", output[0].Checked)
+	}
+	if output[0].Value == nil || *output[0].Value != "1" {
+		t.Errorf("expected value to stay %q, got %+v", "1", output[0].Value)
+	}
+}
+
+func TestFilterSourceElementsLeavesSwitchThatIsOffUnchecked(t *testing.T) {
+	output := filterSourceElements(toggleSwitch("0"))
+
+	if output[0].Checked != nil {
+		t.Errorf("expected checked to be unset, got %v", *output[0].Checked)
+	}
+}
+
+// A value of "1" means nothing about checked state on non-switch elements.
+func TestFilterSourceElementsDoesNotMarkNonSwitchAsChecked(t *testing.T) {
+	field := sourceTreeElement{
+		Type:          "XCUIElementTypeTextField",
+		RawIdentifier: strPtr("quantity"),
+		Value:         strPtr("1"),
+		Rect:          visibleRect(16, 200, 370, 44),
+	}
+
+	output := filterSourceElements(field)
+
+	if output[0].Checked != nil {
+		t.Errorf("expected checked to be unset, got %v", *output[0].Checked)
+	}
+}
+
+// Snapshotting a heavy screen can take the agent longer than the default RPC
+// timeout; dump ui has to wait for it instead of failing with "context
+// deadline exceeded", see https://github.com/mobile-next/mobilecli/issues/448
+func TestDumpUIWaitsForAnAgentSlowerThanTheDefaultRPCTimeout(t *testing.T) {
+	previous := defaultRPCTimeout
+	defaultRPCTimeout = 50 * time.Millisecond
+	t.Cleanup(func() { defaultRPCTimeout = previous })
+
+	slowAgent := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(200 * time.Millisecond)
+		_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":1,"result":{"type":"XCUIElementTypeApplication","rect":{"x":0,"y":0,"width":390,"height":844},"children":[{"type":"XCUIElementTypeButton","label":"Done","rect":{"x":16,"y":62,"width":44,"height":44}}]}}`))
+	}))
+	defer slowAgent.Close()
+
+	client := NewDeviceKitClient(slowAgent.URL)
+
+	if _, err := client.CallRPC("device.info", nil); err == nil {
+		t.Fatal("expected the agent to be slower than the default RPC timeout")
+	}
+
+	elements, err := client.GetSourceElements()
+	if err != nil {
+		t.Fatalf("GetSourceElements: %v", err)
+	}
+	if len(elements) != 1 || elementLabel(elements[0]) != "Done" {
+		t.Errorf("expected the Done button, got %+v", elements)
+	}
+
+	if _, err := client.GetSourceRaw(); err != nil {
+		t.Fatalf("GetSourceRaw: %v", err)
 	}
 }

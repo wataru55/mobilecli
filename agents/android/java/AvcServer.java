@@ -1,10 +1,10 @@
 package com.mobilenext.mobilecli;
 
-import android.hardware.display.VirtualDisplay;
 import android.media.MediaCodec;
 import android.media.MediaCodecInfo;
 import android.media.MediaFormat;
 import android.os.Bundle;
+import android.os.SystemClock;
 import android.util.Log;
 
 import org.json.JSONObject;
@@ -35,6 +35,9 @@ public class AvcServer {
 	private static final int MAX_BITRATE = 10_000_000;
 	private static final int I_FRAME_INTERVAL = 2; // seconds
 	private static final long DEQUEUE_TIMEOUT_US = 100_000; // matches REPEAT_PREVIOUS_FRAME_AFTER
+	// The encoder is "idle" when it produced nothing for this long: the screen is static and
+	// REPEAT_PREVIOUS_FRAME_AFTER has stopped feeding it (it repeats a frame only a few times).
+	private static final long IDLE_AFTER_MS = 500;
 
 	// localabstract socket for the control channel; must match avcControlSocket in devices/avc_control.go
 	static final String CONTROL_SOCKET = "mobilecli-avc";
@@ -47,6 +50,7 @@ public class AvcServer {
 	// MediaCodec is driven from the encoder thread; control-socket commands are
 	// enqueued here and drained there so all codec access stays single-threaded.
 	private final ConcurrentLinkedQueue<Runnable> codecCommands = new ConcurrentLinkedQueue<>();
+	private volatile long lastOutputAtMs = SystemClock.uptimeMillis();
 
 	AvcServer(int bitrate, float scale, int fps) {
 		this.bitrate = bitrate;
@@ -80,7 +84,7 @@ public class AvcServer {
 		return Math.max(MIN_BITRATE, Math.min(MAX_BITRATE, bps));
 	}
 
-	private void startControlServer(MediaCodec codec) {
+	private void startControlServer(MediaCodec codec, DisplayUtils.DisplayMirror mirror) {
 		new JsonRpcSocketServer(CONTROL_SOCKET, (method, params) -> {
 			switch (method) {
 				case "screencapture.setBitrate": {
@@ -101,6 +105,11 @@ public class AvcServer {
 						Bundle b = new Bundle();
 						b.putInt(MediaCodec.PARAMETER_KEY_REQUEST_SYNC_FRAME, 0);
 						codec.setParameters(b);
+						// A sync frame is made from the next input frame, and a static screen
+						// sends none: have the display drawn once more so there is one.
+						if (SystemClock.uptimeMillis() - lastOutputAtMs > IDLE_AFTER_MS) {
+							mirror.refresh();
+						}
 					});
 					return new JSONObject().put("ok", true);
 				}
@@ -160,7 +169,7 @@ public class AvcServer {
 			throw e;
 		}
 
-		VirtualDisplay virtualDisplay = DisplayUtils.createVirtualDisplay(
+		DisplayUtils.DisplayMirror virtualDisplay = DisplayUtils.createVirtualDisplay(
 				"avc.screen.capture", width, height, codec.createInputSurface());
 		if (virtualDisplay == null) {
 			codec.release();
@@ -168,7 +177,7 @@ public class AvcServer {
 		}
 
 		codec.start();
-		startControlServer(codec);
+		startControlServer(codec, virtualDisplay);
 
 		MediaCodec.BufferInfo info = new MediaCodec.BufferInfo();
 		FileChannel stdout = new FileOutputStream(FileDescriptor.out).getChannel();
@@ -201,6 +210,7 @@ public class AvcServer {
 					}
 				}
 				codec.releaseOutputBuffer(index, false);
+				lastOutputAtMs = SystemClock.uptimeMillis();
 			}
 		} finally {
 			try { stdout.close(); } catch (Exception ignored) { }

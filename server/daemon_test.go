@@ -58,7 +58,9 @@ func TestCLIStreamMethodsReportUnknownDeviceInsideEnvelope(t *testing.T) {
 func TestLineNotifierSendsOneNotificationPerLine(t *testing.T) {
 	var got []string
 	w := &lineNotifier{notify: func(v any) error {
-		got = append(got, string(v.(json.RawMessage)))
+		raw, ok := v.(json.RawMessage)
+		require.True(t, ok)
+		got = append(got, string(raw))
 		return nil
 	}}
 
@@ -80,4 +82,16 @@ func TestMessageNotifierWrapsWritesAsMessages(t *testing.T) {
 	require.NoError(t, err)
 
 	assert.Equal(t, []any{daemon.StreamProgress{Progress: "\rRecording 00:01"}}, got)
+}
+
+func TestFoldSetRejectsInvalidStateBeforeLookingUpDevice(t *testing.T) {
+	_, err := DaemonDispatch(context.Background(), "device.fold.set", json.RawMessage(`{"deviceId":"__nope__","state":"sideways"}`), noNotify)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "invalid fold state")
+}
+
+func TestFoldSetRequiresDeviceID(t *testing.T) {
+	_, err := DaemonDispatch(context.Background(), "device.fold.set", json.RawMessage(`{"state":"open"}`), noNotify)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "'deviceId' is required")
 }

@@ -69,18 +69,21 @@ func Run(ctx context.Context, opts Options) error {
 		return fmt.Errorf("create daemon dir: %w", err)
 	}
 	// never steal the socket from a live daemon (two clients racing to spawn)
-	if conn, err := net.DialTimeout("unix", opts.Paths.Socket, dialTimeout); err == nil {
+	if conn, err := (&net.Dialer{Timeout: dialTimeout}).DialContext(context.Background(), "unix", opts.Paths.Socket); err == nil {
 		_ = conn.Close()
 		return fmt.Errorf("daemon already running on %s", opts.Paths.Socket)
 	}
 	// a leftover socket file from a crashed daemon would make Listen fail
 	_ = os.Remove(opts.Paths.Socket)
 
-	ln, err := net.Listen("unix", opts.Paths.Socket)
+	ln, err := (&net.ListenConfig{}).Listen(context.Background(), "unix", opts.Paths.Socket)
 	if err != nil {
 		return fmt.Errorf("listen on %s: %w", opts.Paths.Socket, err)
 	}
-	_ = os.Chmod(opts.Paths.Socket, 0o600)
+	if err := os.Chmod(opts.Paths.Socket, 0o600); err != nil {
+		_ = ln.Close()
+		return fmt.Errorf("restrict %s: %w", opts.Paths.Socket, err)
+	}
 
 	s := &server{opts: opts, startedAt: time.Now(), shutdown: make(chan struct{})}
 	s.touch()

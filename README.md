@@ -14,7 +14,7 @@ A universal command-line tool for managing iOS and Android devices, simulators, 
   <a href="https://github.com/mobile-next/mobilecli/blob/main/LICENSE">
     <img src="https://img.shields.io/badge/license-FSL--1.1--Apache--2.0-blue.svg" alt="mobilecli is released under the FSL-1.1-Apache-2.0 License">
   </a>
-  <a href="http://mobilenext.ai/join-slack">
+  <a href="https://mobilenext.ai/join-slack?utm_source=github&utm_medium=readme&utm_campaign=mobilecli&utm_content=badge">
       <img src="https://img.shields.io/badge/join-Slack-blueviolet?logo=slack&style=flat" alt="Slack community channel" />
   </a>
 </p>
@@ -55,6 +55,20 @@ A universal command-line tool for managing iOS and Android devices, simulators, 
 npm install -g mobilecli@latest
 ```
 
+#### Shell Completion ⌨️
+```bash
+# zsh
+echo 'source <(mobilecli completion zsh)' >> ~/.zshrc
+
+# bash 4.1+ (requires bash-completion; macOS ships bash 3.2)
+echo 'source <(mobilecli completion bash)' >> ~/.bashrc
+
+# fish
+mobilecli completion fish > ~/.config/fish/completions/mobilecli.fish
+```
+
+Run `mobilecli completion --help` for PowerShell and other options.
+
 ### Agent Setup 🤖
 
 Install `mobilecli` and add the skill so your coding agent knows how to use it:
@@ -77,6 +91,22 @@ mobilecli devices --include-offline
 ```
 
 **Note**: Offline emulators and simulators can be booted using the `mobilecli device boot` command.
+
+### Default Device 🎯
+
+When only one device is online, mobilecli selects it automatically and `--device` isn't needed.
+
+With several devices online, set `MOBILECLI_DEVICE` to skip `--device` on every command. An explicit `--device` still takes precedence.
+
+```bash
+export MOBILECLI_DEVICE=<device-id>
+
+# Taps on $MOBILECLI_DEVICE
+mobilecli io tap 100,200
+
+# Overrides $MOBILECLI_DEVICE for this command only
+mobilecli io tap --device <other-device-id> 100,200
+```
 
 ### Take Screenshots 📸
 
@@ -101,6 +131,22 @@ mobilecli screenshot --device <device-id> --output screenshot.png
 
 # Output to stdout
 mobilecli screenshot --device <device-id> --output -
+```
+
+### UI Tree 🌳
+
+```bash
+# Dump the UI tree as indented text, each element with a ref like @e5
+mobilecli snapshot --device <device-id>
+
+# Same as snapshot
+mobilecli dump ui --device <device-id> --format text
+
+# Dump the UI tree as JSON, including each element's rect
+mobilecli dump ui --device <device-id>
+
+# Tap an element by its ref from the latest dump
+mobilecli io tap --device <device-id> @e5
 ```
 
 ### Stream Screen 🎥
@@ -135,8 +181,17 @@ mobilecli io button --device <device-id> HOME
 mobilecli io button --device <device-id> VOLUME_UP
 mobilecli io button --device <device-id> POWER
 
+# Check whether the on-screen keyboard is showing
+mobilecli io keyboard status --device <device-id>
+
+# Hide the on-screen keyboard (on real iOS devices only in debuggable apps, on simulators only in apps you installed)
+mobilecli io keyboard hide --device <device-id>
+
 # Send text
 mobilecli io text --device <device-id> 'hello world'
+
+# Replace the focused field's text in one step ('' clears it)
+mobilecli io fill --device <device-id> 'hello world'
 
 # Read device clipboard
 mobilecli io clipboard get --device <device-id>
@@ -199,7 +254,7 @@ mobilecli apps install <path> --device <device-id>
 # Uninstall an app
 mobilecli apps uninstall <bundle-id> --device <device-id>
 
-# Clear app data (cache, preferences, databases) without uninstalling
+# Clear app data (cache, preferences, databases) and reset permissions, without uninstalling
 # Supported on Android and iOS Simulator
 mobilecli apps clear <bundle-id> --device <device-id>
 ```
@@ -290,6 +345,10 @@ Example output for `agent status`:
 ### Webview Inspection 🌐
 
 Inspect and interact with embedded webviews (`WKWebView` on iOS, `android.webkit.WebView` on Android) running inside native apps.
+
+On Android the same commands also drive the tabs of Chrome when it is the foreground app, over the Chrome DevTools Protocol. Chrome freezes the tabs it is not showing, so only the visible tab (`isVisible: true`) answers `eval` and the commands built on it.
+
+On iOS, real devices and simulators alike, the same commands also drive the tabs of Safari when it is the foreground app, through the device's Web Inspector service. A real device needs **Settings > Apps > Safari > Advanced > Web Inspector** turned on. Safari does not keep the tabs it is not showing running: a command on such a tab fails after 2 seconds, so use the tab listed with `isVisible: true`.
 
 ```bash
 # List embedded webviews in the foreground app
@@ -461,6 +520,8 @@ mobilecli daemon start --idle-timeout 0
 
 The CLI and daemon talk JSON-RPC over a unix domain socket in `~/.mobilecli/` (override with `MOBILECLI_HOME`); the daemon's log is `~/.mobilecli/daemon.log`. A daemon left over from an older mobilecli version is restarted automatically. `auth login` and `auth logout` stop a running daemon so it picks up the new credentials.
 
+On Android, the daemon keeps a small server running on the device (`com.mobilenext.mobilecli.DeviceServer`) that holds the device's only UiAutomation connection, so other UiAutomator clients such as `uiautomator dump` or Appium cannot run alongside it. The daemon stops that server when it exits, so `mobilecli daemon stop` hands the device back to other tools; the server also exits by itself after 30 minutes without requests (`MOBILECLI_DEVICE_SERVER_IDLE_TIMEOUT=5m` shortens that).
+
 ## HTTP API 🔌
 
 ***mobilecli*** provides an http interface for all the functionality that is available through command line. The server is a thin front for the daemon above, so HTTP clients and the CLI share one set of devices and tunnels.
@@ -512,9 +573,11 @@ make test
 
 ## Support 💬
 
+Something not working? Check [docs/troubleshooting.md](docs/troubleshooting.md) first.
+
 For issues and feature requests, please use the [GitHub Issues](https://github.com/mobile-next/mobilecli/issues) page.
 
-Be sure to <a href="http://mobilenext.ai/join-slack">join our slack channel</a> today 💜
+Be sure to <a href="https://mobilenext.ai/join-slack?utm_source=github&utm_medium=readme&utm_campaign=mobilecli&utm_content=contributing">join our slack channel</a> today 💜
 
-To learn more about <a href="https://mobilenext.ai/">Mobile Next</a> and what we're building.
+To learn more about <a href="https://mobilenext.ai/?utm_source=github&utm_medium=readme&utm_campaign=mobilecli&utm_content=part-of-mobile-next">Mobile Next</a> and what we're building.
 

@@ -316,7 +316,7 @@ func handleJSONRPC(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if req.JSONRPC != "2.0" {
+	if req.JSONRPC != jsonRPCVersion {
 		sendJSONRPCError(w, req.ID, ErrCodeInvalidRequest, "Invalid Request", "'jsonrpc' must be '2.0'")
 		return
 	}
@@ -361,7 +361,7 @@ func handleJSONRPC(w http.ResponseWriter, r *http.Request) {
 
 func sendJSONRPCResponse(w http.ResponseWriter, id any, result any) {
 	response := JSONRPCResponse{
-		JSONRPC: "2.0",
+		JSONRPC: jsonRPCVersion,
 		Result:  result,
 		ID:      id,
 	}
@@ -764,7 +764,7 @@ type DeviceRebootParams struct {
 type DumpUIParams struct {
 	DeviceID string `json:"deviceId"`
 	Format   string `json:"format,omitempty"` // "json" or "raw"
-	Full     bool   `json:"full,omitempty"`   // include the on-screen keyboard and other normally hidden windows
+	Full     bool   `json:"full,omitempty"`   // include the on-screen keyboard, the Android status bar and other normally hidden windows
 	Source   string `json:"source,omitempty"` // "render", "semantics" or "ax"; empty picks the render tree with an accessibility fallback
 }
 
@@ -1357,7 +1357,7 @@ func handleServerShutdown(params json.RawMessage) (any, error) {
 
 func sendJSONRPCError(w http.ResponseWriter, id any, code int, message string, data any) {
 	response := JSONRPCResponse{
-		JSONRPC: "2.0",
+		JSONRPC: jsonRPCVersion,
 		Error: map[string]any{
 			"code":    code,
 			"message": message,
@@ -1382,7 +1382,7 @@ func sendBanner(w http.ResponseWriter, r *http.Request) {
 // newJsonRpcNotification creates a JSON-RPC notification message
 func newJsonRpcNotification(message string) map[string]any {
 	return map[string]any{
-		"jsonrpc": "2.0",
+		"jsonrpc": jsonRPCVersion,
 		"method":  "notification/message",
 		"params": map[string]string{
 			"message": message,

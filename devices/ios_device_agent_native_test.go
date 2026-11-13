@@ -18,7 +18,7 @@ import (
 // TestNativeAgentMapperBootsOverTunnel maps the embedded agent dylib
 // into a live foreground app and confirms its server bound a port — the full
 // injectAgentNative path minus the go-ios transport, exercised over the userspace
-// tunnel forwarder so it needs no WDA/devicekit setup.
+// tunnel forwarder so it needs no DeviceKit agent setup.
 //
 // Gated on NATIVE_INJECT_TEST; skipped otherwise so CI without a device stays
 // green. Env: NATIVE_INJECT_HOST (tunnel IPv6), NATIVE_INJECT_TUNNEL_PORT (local
@@ -198,6 +198,35 @@ func TestInjectionFailsAtOnceWhenTheAppIsNotDebuggable(t *testing.T) {
 
 	if !errors.Is(err, errAttachRefused) {
 		t.Errorf("err = %v, want the refused attach", err)
+	}
+	if calls != 1 {
+		t.Errorf("attached %d times, want 1", calls)
+	}
+}
+
+func TestExistingAgentPortIgnoresTheUpperHalfOfTheRegister(t *testing.T) {
+	port, err := existingAgentPort(1, 0xdeadbeef0000c000)
+
+	if err != nil || port != 0xc000 {
+		t.Errorf("port = %d, err = %v; want %d and no error", port, err, 0xc000)
+	}
+}
+
+func TestExistingAgentWithoutAServerAsksForARelaunch(t *testing.T) {
+	_, err := existingAgentPort(1, 0)
+
+	if err == nil || !strings.Contains(err.Error(), "relaunch the app") {
+		t.Errorf("err = %v, want one that asks for a relaunch", err)
+	}
+}
+
+func TestAgentFromAnOlderVersionAsksForARelaunchAndIsNotRetried(t *testing.T) {
+	calls := 0
+
+	_, err := retryWhileAppIsBusy(injectionThatFails(probeError(machomap.ErrClassMethodNotFound), -1, &calls))
+
+	if err == nil || !strings.Contains(err.Error(), "relaunch the app") {
+		t.Errorf("err = %v, want one that asks for a relaunch", err)
 	}
 	if calls != 1 {
 		t.Errorf("attached %d times, want 1", calls)
